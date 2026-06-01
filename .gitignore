@@ -1,0 +1,6 @@
+﻿# MetaTrader compiled binaries
+*.ex4
+*.ex5
+
+# Claude Code settings
+.claude/
