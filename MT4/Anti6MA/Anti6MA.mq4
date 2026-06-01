@@ -1,3 +1,14 @@
+//+------------------------------------------------------------------+
+//|  Anti6MA.mq4                                                     |
+//|  Copyright (c) 2025-2026, Jonathas Costa                         |
+//|  github.com/jonathas/trading-bots                                |
+//|                                                                  |
+//|  MIT License - free to use and modify, keeping this              |
+//|  header and copyright notice in all copies.                      |
+//+------------------------------------------------------------------+
+#property copyright "Jonathas Costa"
+#property link      "https://github.com/jonathas/trading-bots"
+
 #property strict
 #property version "3.2"
 
@@ -109,7 +120,7 @@ void RestoreTradeVars()
    datetime latestSellTime = 0;
    int buyCount = 0;
    int sellCount = 0;
-   
+
    for (int i = 0; i < OrdersTotal(); i++)
    {
       if(OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
@@ -118,7 +129,7 @@ void RestoreTradeVars()
          {
             if(OrderType() == OP_BUY)
             {
-               buyCount++; 
+               buyCount++;
                if(OrderOpenTime() > latestBuyTime)
                {
                   latestBuyTime = OrderOpenTime();
@@ -128,7 +139,7 @@ void RestoreTradeVars()
             }
             else if(OrderType() == OP_SELL)
             {
-               sellCount++;  
+               sellCount++;
                if(OrderOpenTime() > latestSellTime)
                {
                   latestSellTime = OrderOpenTime();
@@ -139,11 +150,11 @@ void RestoreTradeVars()
          }
       }
    }
-   
-   Print("Debug RestoreTradeVars: ", buyCount, " BUY orders found; Last BUY entry price = ", 
+
+   Print("Debug RestoreTradeVars: ", buyCount, " BUY orders found; Last BUY entry price = ",
          DoubleToStr(lastBuyEntryPrice, Digits), ", Last BUY lot = ", DoubleToStr(lastBuyLot, 2));
-         
-   Print("Debug RestoreTradeVars: ", sellCount, " SELL orders found; Last SELL entry price = ", 
+
+   Print("Debug RestoreTradeVars: ", sellCount, " SELL orders found; Last SELL entry price = ",
          DoubleToStr(lastSellEntryPrice, Digits), ", Last SELL lot = ", DoubleToStr(lastSellLot, 2));
 }
 
@@ -178,27 +189,27 @@ int deinit()
 int start()
 {
    RestoreTradeVars();
-   
+
    CheckAndCloseIfBalancedAndProfit();
-   
+
    double minLot   = MarketInfo(Symbol(), MODE_MINLOT);
    double lotStep  = MarketInfo(Symbol(), MODE_LOTSTEP);
-   
+
    double dynamicInitialLot = MathFloor(AccountBalance() / 100000.0) * 0.1;
    if(dynamicInitialLot < 0.1)
        dynamicInitialLot = 0.1;
    if(dynamicInitialLot < minLot)
        dynamicInitialLot = minLot;
-   
+
    double ma = iMA(NULL, 0, MA_Period, 0, MODE_SMA, PRICE_CLOSE, 0);
    double maPrev = iMA(NULL, 0, MA_Period, 0, MODE_SMA, PRICE_CLOSE, 1);
    bool maRising = (ma > maPrev);
    bool maFalling = (ma < maPrev);
-   
+
    if (TimeCurrent() - lastOrderTime < 1)
       return(0);
-      
-   int sellCount = CountOrders(OP_SELL);  
+
+   int sellCount = CountOrders(OP_SELL);
    if(maRising)
    {
       if(sellCount == 0)
@@ -222,7 +233,7 @@ int start()
          }
       }
    }
-   
+
    int buyCount = CountOrders(OP_BUY);
    if(maFalling)
    {
@@ -247,24 +258,24 @@ int start()
          }
       }
    }
-   
+
    double totalProfitPips = AggregateProfitPips();
    double dynamicExitProfit = CalcDynamicExitProfitPips(lastSellLot > lastBuyLot ? lastSellLot : lastBuyLot, dynamicInitialLot, ExitProfitPips);
-   
+
    if(totalProfitPips >= dynamicExitProfit)
    {
       CloseAllOrders();
    }
-   
+
    if(sellCount > 0)
       DrawDynamicSellLevels();
-   
+
    if(buyCount > 0)
       DrawDynamicBuyLevels();
-      
+
    double progress = totalProfitPips / dynamicExitProfit;
    if(progress > 1.0) progress = 1.0;
-   
+
    int progressBarLength = 20;
    int filledBars = (int)MathRound(progress * progressBarLength);
    string progressBar = "";
@@ -275,9 +286,9 @@ int start()
       else
          progressBar += "-";
    }
-   
+
    Comment("Profit: ", DoubleToStr(totalProfitPips,2), " pips\nProgress: [", progressBar, "] ", DoubleToStr(progress * 100,0), "%");
-   
+
    return(0);
 }
 
@@ -294,11 +305,11 @@ void CheckAndCloseIfBalancedAndProfit()
 {
    int sellCount = CountOrders(OP_SELL);
    int buyCount = CountOrders(OP_BUY);
-   
+
    if(sellCount > 0 && sellCount == buyCount)
    {
       double totalProfitPips = AggregateProfitPips();
-      
+
       if(totalProfitPips > 0)
       {
          Print("Equal number of BUY and SELL orders with profit (", DoubleToStr(totalProfitPips,2), " pips). Closing all trades.");
@@ -307,10 +318,10 @@ void CheckAndCloseIfBalancedAndProfit()
    }
 }
 
-double SimulatedSellEquity(double S) 
-{ 
+double SimulatedSellEquity(double S)
+{
    double eq = AccountBalance();
-   
+
    for(int i = 0; i < OrdersTotal(); i++)
    {
        if(OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
@@ -325,26 +336,26 @@ double SimulatedSellEquity(double S)
            }
        }
    }
-   
-   double simPrice = lastSellEntryPrice;   
-   double simLot   = lastSellLot;          
-   
+
+   double simPrice = lastSellEntryPrice;
+   double simLot   = lastSellLot;
+
    while(S >= simPrice + ReentryPips * PipValue)
    {
-       simPrice += ReentryPips * PipValue; 
-       simLot   *= 2;                      
-   
+       simPrice += ReentryPips * PipValue;
+       simLot   *= 2;
+
        eq += ((simPrice - S) / PipValue) * simLot;
    }
-   
+
    return eq;
 
 }
 
-double SimulatedBuyEquity(double S) 
-{ 
+double SimulatedBuyEquity(double S)
+{
    double eq = AccountBalance();
-   
+
    for(int i = 0; i < OrdersTotal(); i++)
    {
        if(OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
@@ -359,61 +370,61 @@ double SimulatedBuyEquity(double S)
            }
        }
    }
-   
-   double simPrice = lastBuyEntryPrice;   
-   double simLot   = lastBuyLot;          
-   
+
+   double simPrice = lastBuyEntryPrice;
+   double simLot   = lastBuyLot;
+
    while(S <= simPrice - ReentryPips * PipValue)
    {
-       simPrice -= ReentryPips * PipValue; 
-       simLot   *= 2;                      
-   
+       simPrice -= ReentryPips * PipValue;
+       simLot   *= 2;
+
        eq += ((S - simPrice) / PipValue) * simLot;
    }
-   
+
    return eq;
 }
 
-void DrawDynamicSellLevels() 
+void DrawDynamicSellLevels()
 {
-   if(lastSellEntryPrice <= 0) 
+   if(lastSellEntryPrice <= 0)
       return;
-      
+
    int maxLevels = 15;
-   
+
    for(int i = 0; i < maxLevels; i++)
    {
        string objName = "SellSimLevel_" + IntegerToString(i);
        if(ObjectFind(objName) != -1)
            ObjectDelete(objName);
    }
-   
+
    if(ObjectFind("SellBlowout") != -1)
        ObjectDelete("SellBlowout");
-   
+
    for(int n = 0; n < maxLevels; n++)
    {
        double levelPrice = lastSellEntryPrice + n * (ReentryPips * PipValue);
        double predictedLot = lastSellLot;
        if(n > 0)
            predictedLot = lastSellLot * MathPow(2, n);
-       
+
        double simEquity = SimulatedSellEquity(levelPrice);
-       
+
        string objName = "SellSimLevel_" + IntegerToString(n);
        if(ObjectFind(objName) < 0)
            ObjectCreate(objName, OBJ_HLINE, 0, Time[0], levelPrice);
        else
            ObjectSet(objName, OBJPROP_PRICE, levelPrice);
-       
+
        ObjectSet(objName, OBJPROP_COLOR, Orange);
        ObjectSet(objName, OBJPROP_STYLE, STYLE_DOT);
        ObjectSet(objName, OBJPROP_WIDTH, 1);
-       
+
        Print("SELL Level ", n, " - Price: ", DoubleToStr(levelPrice, Digits),
              " | Predicted Lot: ", DoubleToStr(predictedLot, 2),
              " | Simulated Equity: ", DoubleToStr(simEquity,2));
-       
+
        if(simEquity <= 0)
        {
            string blowName = "SellBlowout";
@@ -424,7 +435,7 @@ void DrawDynamicSellLevels()
            ObjectSet(blowName, OBJPROP_COLOR, Red);
            ObjectSet(blowName, OBJPROP_WIDTH, 3);
            ObjectSet(blowName, OBJPROP_STYLE, STYLE_SOLID);
-           
+
            Print("SELL Blowout Level: Price: ", DoubleToStr(levelPrice, Digits),
                  " | Predicted Lot: ", DoubleToStr(predictedLot,2));
            break;
@@ -433,46 +444,46 @@ void DrawDynamicSellLevels()
 }
 
 
-void DrawDynamicBuyLevels() 
+void DrawDynamicBuyLevels()
 {
-   if(lastBuyEntryPrice <= 0) 
+   if(lastBuyEntryPrice <= 0)
       return;
-      
+
    int maxLevels = 15;
-   
+
    for(int i = 0; i < maxLevels; i++)
    {
        string objName = "BuySimLevel_" + IntegerToString(i);
        if(ObjectFind(objName) != -1)
            ObjectDelete(objName);
    }
-   
+
    if(ObjectFind("BuyBlowout") != -1)
        ObjectDelete("BuyBlowout");
-   
+
    for(int n = 0; n < maxLevels; n++)
    {
        double levelPrice = lastBuyEntryPrice - n * (ReentryPips * PipValue);
        double predictedLot = lastBuyLot;
        if(n > 0)
            predictedLot = lastBuyLot * MathPow(2, n);
-       
+
        double simEquity = SimulatedBuyEquity(levelPrice);
-       
+
        string objName = "BuySimLevel_" + IntegerToString(n);
        if(ObjectFind(objName) < 0)
            ObjectCreate(objName, OBJ_HLINE, 0, Time[0], levelPrice);
        else
            ObjectSet(objName, OBJPROP_PRICE, levelPrice);
-       
+
        ObjectSet(objName, OBJPROP_COLOR, Cyan);
        ObjectSet(objName, OBJPROP_STYLE, STYLE_DOT);
        ObjectSet(objName, OBJPROP_WIDTH, 1);
-       
+
        Print("BUY Level ", n, " - Price: ", DoubleToStr(levelPrice, Digits),
              " | Predicted Lot: ", DoubleToStr(predictedLot, 2),
              " | Simulated Equity: ", DoubleToStr(simEquity,2));
-       
+
        if(simEquity <= 0)
        {
            string blowName = "BuyBlowout";
@@ -483,7 +494,7 @@ void DrawDynamicBuyLevels()
            ObjectSet(blowName, OBJPROP_COLOR, Red);
            ObjectSet(blowName, OBJPROP_WIDTH, 3);
            ObjectSet(blowName, OBJPROP_STYLE, STYLE_SOLID);
-           
+
            Print("BUY Blowout Level: Price: ", DoubleToStr(levelPrice, Digits),
                  " | Predicted Lot: ", DoubleToStr(predictedLot,2));
            break;

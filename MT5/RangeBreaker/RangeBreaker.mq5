@@ -1,10 +1,14 @@
 //+------------------------------------------------------------------+
-//|                                               Range Breaker.mq5 |
-//|                      Copyright 2025, Jonathas Costa & Gemini AI |
-//|                                           https://jonathas.net  |
+//|  RangeBreaker.mq5                                                |
+//|  Copyright (c) 2025-2026, Jonathas Costa                         |
+//|  github.com/jonathas/trading-bots                                |
+//|                                                                  |
+//|  MIT License - free to use and modify, keeping this              |
+//|  header and copyright notice in all copies.                      |
 //+------------------------------------------------------------------+
-#property copyright "Copyright 2025, Jonathas Costa & Gemini AI"
-#property link      "https://jonathas.net"
+#property copyright "Jonathas Costa"
+#property link      "https://github.com/jonathas/trading-bots"
+
 #property version   "1.33"
 #property description "Operates on session range breakouts with multiple entry modes."
 
@@ -119,7 +123,7 @@ struct SessionData
    double            session_high;
    double            session_low;
    double            initial_range;
-   
+
    // Buy order fields
    double            buy_entry;
    double            buy_take_profit;
@@ -127,7 +131,7 @@ struct SessionData
    bool              buy_trade_placed;
    ulong             buy_order_ticket;
    ulong             buy_position_id;
-   
+
    // Sell order fields
    double            sell_entry;
    double            sell_take_profit;
@@ -135,12 +139,12 @@ struct SessionData
    bool              sell_trade_placed;
    ulong             sell_order_ticket;
    ulong             sell_position_id;
-   
+
    string            high_line_name;
    string            low_line_name;
    string            buy_entry_line_name;
    string            sell_entry_line_name;
-   
+
    // Trading levels
    int               candles_processed;
 };
@@ -152,13 +156,13 @@ struct SessionStats
    int               buy_orders_tp;
    int               buy_orders_sl;
    double            buy_total_profit;
-   
+
    // Sell order statistics
    int               sell_orders_opened;
    int               sell_orders_tp;
    int               sell_orders_sl;
    double            sell_total_profit;
-   
+
    // Combined statistics
    double            total_range;
    int               range_count;
@@ -205,13 +209,13 @@ bool ValidateInputs()
       {
          if(session_enables[i] && ConfirmationCandle > session_tfs[i])
          {
-            Print("Error: ConfirmationCandle timeframe (", EnumToString(ConfirmationCandle), 
+            Print("Error: ConfirmationCandle timeframe (", EnumToString(ConfirmationCandle),
                   ") cannot be greater than Session ", i+1, " timeframe (", EnumToString(session_tfs[i]), ").");
             return false;
          }
       }
    }
-   
+
    return true;
 }
 
@@ -228,19 +232,19 @@ bool IsValidTimeFormat(string time_str)
 int FindNextActiveSession(int current_session_index)
 {
     bool session_enables[] = {Session1_Enable, Session2_Enable, Session3_Enable, Session4_Enable, Session5_Enable};
-    
+
     // Search from the next session to the end
     for(int i = current_session_index + 1; i < 5; i++)
     {
         if(session_enables[i]) return i;
     }
-    
+
     // Wrap around and search from the beginning
     for(int i = 0; i < current_session_index; i++)
     {
         if(session_enables[i]) return i;
     }
-    
+
     return -1; // No other active session found
 }
 
@@ -347,10 +351,10 @@ void CreateGUIBackground()
    int enabled_sessions_count = 0;
    if(Session1_Enable) enabled_sessions_count++; if(Session2_Enable) enabled_sessions_count++; if(Session3_Enable) enabled_sessions_count++;
    if(Session4_Enable) enabled_sessions_count++; if(Session5_Enable) enabled_sessions_count++;
-   
+
    int panel_width = 420; // Increased width for better spacing
-   int panel_height = 60 + (enabled_sessions_count * 20) + 45; 
-   
+   int panel_height = 60 + (enabled_sessions_count * 20) + 45;
+
    ObjectDelete(0, bg_name);
    if(ObjectCreate(0, bg_name, OBJ_RECTANGLE_LABEL, 0, 0, 0))
    {
@@ -405,15 +409,15 @@ void CreateGUIContent()
    for(int i = 0; i < 5; i++)
    {
       if(!sessions[i].enabled) continue;
-      
+
       int trades = stats[i].buy_orders_opened + stats[i].sell_orders_opened;
       int wins = stats[i].buy_orders_tp + stats[i].sell_orders_tp;
       int losses = stats[i].buy_orders_sl + stats[i].sell_orders_sl;
       double pl = stats[i].buy_total_profit + stats[i].sell_total_profit;
-      
+
       DrawTableRow(sessions[i].name, y, sessions[i].name, trades, wins, losses, pl, stats[i].avg_range, sessions[i].candle_color);
       y += lh;
-      
+
       g_trades += trades;
       g_wins += wins;
       g_losses += losses;
@@ -421,7 +425,7 @@ void CreateGUIContent()
       g_range_t += stats[i].total_range;
       g_range_c += stats[i].range_count;
    }
-   
+
    // --- Table Footer (Total) ---
    CreateGUILabel("EA_GUI_F_Sep1", "----------------------------------------------------------", x, y, GUI_FontSize, clrDarkGray);
    y += lh;
@@ -440,40 +444,40 @@ int OnInit()
 {
    Print("Range Breaker EA v3.03 initialized successfully");
    ea_start_time = TimeCurrent();
-   
+
    if(!ValidateInputs())
    {
       Print("Invalid input parameters detected. EA initialization failed.");
       return(INIT_PARAMETERS_INCORRECT);
    }
-   
+
    trade.SetExpertMagicNumber(MagicNumber);
    trade.SetDeviationInPoints(10);
    trade.SetTypeFilling(ORDER_FILLING_FOK);
-   
+
    InitializeSessions();
    InitializeStatistics();
    CleanupObjects();
-   
+
    if(ShowGUI) UpdateGUI();
-   
+
    Print("Entry Mode: ", WaitForConfirmation ? "On Candle Confirmation" : "Pending Orders");
    if(WaitForConfirmation) Print("Confirmation Timeframe: ", EnumToString(ConfirmationCandle));
    Print("Magic number: ", MagicNumber);
-   
+
    return(INIT_SUCCEEDED);
 }
 
 void OnDeinit(const int reason)
 {
-   CleanupObjects();   
+   CleanupObjects();
    Print("Range Breaker EA deinitialized");
 }
 
 void OnTick()
 {
    datetime current_time = TimeCurrent();
-   
+
    // --- Check for new bar to run confirmation logic ---
    if(last_bar_time != iTime(_Symbol, ConfirmationCandle, 0))
    {
@@ -483,7 +487,7 @@ void OnTick()
          CheckForConfirmationEntry();
       }
    }
-   
+
    // --- Run session logic once per minute ---
    if(current_time - last_check_time >= 60)
    {
@@ -491,7 +495,7 @@ void OnTick()
       CheckSessions();
       last_check_time = current_time;
    }
-   
+
    // --- Update GUI ---
    if(ShowGUI) UpdateGUI();
 }
@@ -507,7 +511,7 @@ void CheckDailyReset()
    MqlDateTime dt;
    TimeToStruct(current_time, dt);
    datetime current_date = StructToTime(dt) - (dt.hour * 3600 + dt.min * 60 + dt.sec);
-   
+
    if(last_reset_date != current_date)
    {
       ResetDailySessionData();
@@ -538,7 +542,7 @@ void ResetDailySessionData()
       sessions[i].sell_order_ticket = 0;
       sessions[i].sell_position_id = 0;
       sessions[i].candles_processed = 0;
-      
+
       ObjectDelete(0, sessions[i].high_line_name);
       ObjectDelete(0, sessions[i].low_line_name);
       ObjectDelete(0, sessions[i].high_line_name + "_Label");
@@ -630,25 +634,25 @@ void EndSession(int session_index)
 
 void ProcessSessionCandles(int session_index)
 {
-   if(sessions[session_index].candles_processed >= sessions[session_index].candle_count) return; 
-   
+   if(sessions[session_index].candles_processed >= sessions[session_index].candle_count) return;
+
    ENUM_TIMEFRAMES tf = sessions[session_index].timeframe;
    int period_seconds = PeriodSeconds(tf);
    datetime start_time = sessions[session_index].session_start_dt;
    datetime end_time = start_time + (sessions[session_index].candle_count * period_seconds);
-   
+
    if(TimeCurrent() < end_time) return; // Wait until the analysis period is fully over
-   
+
    MqlRates rates[];
    // Use CopyRates by time range for better accuracy, especially around midnight
    int copied = CopyRates(_Symbol, tf, start_time, end_time, rates);
-   
-   if(copied < sessions[session_index].candle_count) 
+
+   if(copied < sessions[session_index].candle_count)
    {
       Print("Warning for ", sessions[session_index].name, ": Could not copy all required candles. Got ", copied, ", expected ", sessions[session_index].candle_count);
       if(copied <= 0) return; // If no bars were copied, we can't proceed
    }
-   
+
    ProcessValidatedCandles(session_index, rates, copied);
 }
 
@@ -661,16 +665,16 @@ void ProcessValidatedCandles(int session_index, MqlRates &rates[], int count)
       if(rates[i].low < sessions[session_index].session_low) sessions[session_index].session_low = rates[i].low;
    }
    sessions[session_index].candles_processed = count;
-   
+
    CalculateTradingLevels(session_index);
-   
+
    if(CancelPendingOrdersIfNewSessionStarts)
    {
       InvalidatePreviousOpportunities(session_index);
    }
-   
+
    DrawHighLowLines(session_index);
-   
+
    if(sessions[session_index].initial_range >= MinRange && sessions[session_index].initial_range <= MaxRange)
    {
       if(!WaitForConfirmation)
@@ -685,7 +689,7 @@ void ProcessValidatedCandles(int session_index, MqlRates &rates[], int count)
    }
    else
    {
-      Print("Trading for Session ", session_index + 1, " skipped: Initial Range (", 
+      Print("Trading for Session ", session_index + 1, " skipped: Initial Range (",
             DoubleToString(sessions[session_index].initial_range, _Digits), ") is outside Min/Max limits.");
       sessions[session_index].buy_trade_placed = true;
       sessions[session_index].sell_trade_placed = true;
@@ -716,14 +720,14 @@ void PlaceBuyOrder(int session_index)
    double buy_entry = NormalizeDouble(sessions[session_index].buy_entry, _Digits);
    double take_profit = NormalizeDouble(sessions[session_index].buy_take_profit, _Digits);
    double stop_loss = NormalizeDouble(sessions[session_index].buy_stop_loss, _Digits);
-   
-   double volume = CalculateVolume(buy_entry, stop_loss); 
-   if(volume <= 0) 
+
+   double volume = CalculateVolume(buy_entry, stop_loss);
+   if(volume <= 0)
    {
       Print("Volume calculation failed for Buy order, Session ", session_index + 1);
       return;
    }
-   
+
    string comment = TradeComment + "_S" + IntegerToString(session_index + 1) + "_BUY";
    if(trade.BuyStop(volume, buy_entry, _Symbol, stop_loss, take_profit, ORDER_TIME_GTC, 0, comment))
    {
@@ -765,12 +769,12 @@ double CalculateVolume(double entry_price, double stop_loss_price)
 
    //--- Normalization and Safety Checks ---
    volume = MathFloor(volume / volume_step) * volume_step;
-   
-   if(volume < min_volume) 
+
+   if(volume < min_volume)
       volume = min_volume;
-   if(volume > max_volume) 
+   if(volume > max_volume)
       volume = max_volume;
-      
+
    //--- Margin Check
    double free_margin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
    double required_margin = 0;
@@ -779,12 +783,12 @@ double CalculateVolume(double entry_price, double stop_loss_price)
       Print("Failed to calculate margin for volume ", volume, ". Error: ", GetLastError());
       return 0;
    }
-   if(required_margin > free_margin) 
-   { 
+   if(required_margin > free_margin)
+   {
       Print("Not enough free margin for volume ", volume, ". Required: ", required_margin, ", Free: ", free_margin);
-      return 0; 
+      return 0;
    }
-   
+
    return volume;
 }
 
@@ -793,9 +797,9 @@ void PlaceSellOrder(int session_index)
    double sell_entry = NormalizeDouble(sessions[session_index].sell_entry, _Digits);
    double take_profit = NormalizeDouble(sessions[session_index].sell_take_profit, _Digits);
    double stop_loss = NormalizeDouble(sessions[session_index].sell_stop_loss, _Digits);
-   
+
    double volume = CalculateVolume(sell_entry, stop_loss);
-   if(volume <= 0) 
+   if(volume <= 0)
    {
       Print("Volume calculation failed for Sell order, Session ", session_index + 1);
       return;
@@ -853,12 +857,12 @@ void ProcessDeal(ulong deal_ticket)
          ObjectDelete(0, sessions[session_index].sell_entry_line_name);
       }
    }
-   
+
    // --- B: Position was just CLOSED ---
    if(deal_entry == DEAL_ENTRY_OUT || deal_entry == DEAL_ENTRY_INOUT)
    {
       int session_index = -1; bool is_buy_trade = false;
-      
+
       // NEW ROBUST LOGIC: Trace back from position to original order comment
       if(HistorySelectByPosition(position_id))
       {
@@ -929,7 +933,7 @@ void InvalidatePreviousOpportunities(int current_session_index)
             Print("Invalidating confirmation opportunity for session ", sessions[i].name);
             sessions[i].buy_trade_placed = true;
             sessions[i].sell_trade_placed = true;
-            
+
             // Also delete the visual entry lines
             ObjectDelete(0, sessions[i].buy_entry_line_name);
             ObjectDelete(0, sessions[i].sell_entry_line_name);
@@ -980,14 +984,14 @@ void ExecuteMarketBuy(int session_index)
     double price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
     double take_profit = NormalizeDouble(sessions[session_index].buy_take_profit, _Digits);
     double stop_loss = NormalizeDouble(sessions[session_index].buy_stop_loss, _Digits);
-    
+
     double volume = CalculateVolume(price, stop_loss);
     if(volume <= 0)
     {
         Print("Volume calculation failed for Market Buy, Session ", session_index + 1);
         return;
     }
-    
+
     string comment = TradeComment + "_S" + IntegerToString(session_index + 1) + "_BUY_Confirm";
     if(trade.Buy(volume, _Symbol, price, stop_loss, take_profit, comment))
     {
@@ -1003,14 +1007,14 @@ void ExecuteMarketSell(int session_index)
     double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
     double take_profit = NormalizeDouble(sessions[session_index].sell_take_profit, _Digits);
     double stop_loss = NormalizeDouble(sessions[session_index].sell_stop_loss, _Digits);
-    
+
     double volume = CalculateVolume(price, stop_loss);
     if(volume <= 0)
     {
         Print("Volume calculation failed for Market Sell, Session ", session_index + 1);
         return;
     }
-    
+
     string comment = TradeComment + "_S" + IntegerToString(session_index + 1) + "_SELL_Confirm";
     if(trade.Sell(volume, _Symbol, price, stop_loss, take_profit, comment))
     {
@@ -1031,7 +1035,7 @@ void DrawHighLowLines(int session_index)
    if(sessions[session_index].session_high <= 0) return;
 
    // --- Clean up previous objects for this session ---
-   ObjectDelete(0, sessions[session_index].high_line_name); 
+   ObjectDelete(0, sessions[session_index].high_line_name);
    ObjectDelete(0, sessions[session_index].low_line_name);
    ObjectDelete(0, sessions[session_index].high_line_name + "_Label");
    ObjectDelete(0, sessions[session_index].low_line_name + "_Label");
@@ -1068,7 +1072,7 @@ void DrawHighLowLines(int session_index)
          ObjectSetInteger(0, high_label_name, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
          ObjectSetInteger(0, high_label_name, OBJPROP_BACK, true);
       }
-      
+
       // Low Label
       string low_label_name = sessions[session_index].low_line_name + "_Label";
       string low_label_text = " " + sessions[session_index].name + " Low (" + DoubleToString(sessions[session_index].session_low, _Digits) + ")";
@@ -1088,7 +1092,7 @@ void DrawHighLowLines(int session_index)
    {
       datetime entry_line_start_time = sessions[session_index].session_start_dt + (sessions[session_index].candle_count * PeriodSeconds(sessions[session_index].timeframe));
       datetime entry_line_end_time = 0;
-      
+
       int next_session_index = FindNextActiveSession(session_index);
       if(next_session_index != -1)
       {

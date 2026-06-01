@@ -1,3 +1,14 @@
+//+------------------------------------------------------------------+
+//|  EveryCandle.mq5                                                 |
+//|  Copyright (c) 2025-2026, Jonathas Costa                         |
+//|  github.com/jonathas/trading-bots                                |
+//|                                                                  |
+//|  Licenca MIT - uso e modificacao livres, mantendo este           |
+//|  cabecalho e aviso de copyright em todas as copias.              |
+//+------------------------------------------------------------------+
+#property copyright "Jonathas Costa"
+#property link      "https://github.com/jonathas/trading-bots"
+
 #include <Trade/Trade.mqh>
 
 CTrade trade;

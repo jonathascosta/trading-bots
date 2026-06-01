@@ -1,10 +1,14 @@
-﻿//+------------------------------------------------------------------+
-//|                                       XAUUSD_Exhaustion_Grid.mq5 |
-//|                                                   Jonathas Costa |
-//|                                             https://www.mql5.com |
+//+------------------------------------------------------------------+
+//|  XAUUSD_Exhaustion_Grid.mq5                                      |
+//|  Copyright (c) 2025-2026, Jonathas Costa                         |
+//|  github.com/jonathas/trading-bots                                |
+//|                                                                  |
+//|  Licenca MIT - uso e modificacao livres, mantendo este           |
+//|  cabecalho e aviso de copyright em todas as copias.              |
 //+------------------------------------------------------------------+
 #property copyright "Jonathas Costa"
-#property link      "https://www.mql5.com"
+#property link      "https://github.com/jonathas/trading-bots"
+
 #property version   "1.70" // Versão atualizada com Calendário Económico e Filtro de Horário
 
 #include <Trade\Trade.mqh>
@@ -50,19 +54,19 @@ bool IsTradingTime()
    datetime now = TimeCurrent(); // Hora do servidor
    MqlDateTime dt;
    TimeToStruct(now, dt);
-   
+
    int current_mins = dt.hour * 60 + dt.min;
-   
+
    string start_parts[];
    string end_parts[];
    StringSplit(InpStartTime, ':', start_parts);
    StringSplit(InpEndTime, ':', end_parts);
-   
+
    if(ArraySize(start_parts) < 2 || ArraySize(end_parts) < 2) return true; // Proteção contra formato inválido
-   
+
    int start_mins = (int)StringToInteger(start_parts[0]) * 60 + (int)StringToInteger(start_parts[1]);
    int end_mins = (int)StringToInteger(end_parts[0]) * 60 + (int)StringToInteger(end_parts[1]);
-   
+
    // Verifica se o horário ocorre no mesmo dia (ex: 08:00 às 17:00)
    if(start_mins < end_mins)
      {
@@ -73,7 +77,7 @@ bool IsTradingTime()
      {
       if(current_mins >= start_mins || current_mins < end_mins) return true;
      }
-     
+
    return false;
   }
 
@@ -86,11 +90,11 @@ bool IsNewsTime()
 
    datetime now = TimeCurrent();
    // Calcula a janela: olha para trás (After) e para a frente (Before)
-   datetime from = now - (InpNewsAfterMin * 60); 
-   datetime to   = now + (InpNewsBeforeMin * 60); 
+   datetime from = now - (InpNewsAfterMin * 60);
+   datetime to   = now + (InpNewsBeforeMin * 60);
 
    MqlCalendarValue values[];
-   
+
    // Puxa o histórico de valores do calendário nesse intervalo de tempo
    if(CalendarValueHistory(values, from, to) <= 0) return false;
 
@@ -120,7 +124,7 @@ int OnInit()
   {
    trade.SetExpertMagicNumber(InpMagic);
    // Define slippage aceitável
-   trade.SetDeviationInPoints(30); 
+   trade.SetDeviationInPoints(30);
    return(INIT_SUCCEEDED);
   }
 
@@ -132,11 +136,11 @@ void OnTick()
    // 1. Obter preços atuais
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   
+
    // 2. Obter High e Low da barra anterior
    double prev_high = iHigh(_Symbol, PERIOD_CURRENT, 1);
    double prev_low  = iLow(_Symbol, PERIOD_CURRENT, 1);
-   
+
    // 3. Analisar posições abertas E ordens pendentes
    int    openTrades = 0;
    long   positionType = -1;
@@ -144,7 +148,7 @@ void OnTick()
    double weightedPriceSum = 0.0;
    double lastEntryPrice = 0.0;
    long   lastEntryTime = 0;
-   
+
    // Loop através de todas as posições ATIVAS
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
@@ -153,13 +157,13 @@ void OnTick()
         {
          openTrades++;
          positionType = PositionGetInteger(POSITION_TYPE); // 0 = Buy, 1 = Sell
-         
+
          double vol = PositionGetDouble(POSITION_VOLUME);
          double price = PositionGetDouble(POSITION_PRICE_OPEN);
-         
+
          totalVolume += vol;
          weightedPriceSum += (price * vol);
-         
+
          long posTime = PositionGetInteger(POSITION_TIME_MSC);
          if(posTime > lastEntryTime)
            {
@@ -168,7 +172,7 @@ void OnTick()
            }
         }
      }
-     
+
    // Loop através de todas as ordens PENDENTES (Limits)
    int pendingOrders = 0;
    for(int i = OrdersTotal() - 1; i >= 0; i--)
@@ -179,11 +183,11 @@ void OnTick()
          pendingOrders++;
         }
      }
-     
+
    double avgPrice = (totalVolume > 0) ? (weightedPriceSum / totalVolume) : 0.0;
 
    // 4. --- LÓGICA DE SAÍDA E LIMPEZA (Sempre ativa, mesmo com notícias/horários restritos) ---
-   
+
    // Se não há ordens abertas, mas sobraram ordens LIMIT (TP atingido), limpe tudo!
    if(openTrades == 0 && pendingOrders > 0)
      {
@@ -204,9 +208,9 @@ void OnTick()
      {
       double targetTP = 0.0;
       bool shouldCloseNow = false;
-      
+
       double stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
-      
+
       if(positionType == POSITION_TYPE_BUY)
         {
          targetTP = NormalizeDouble(avgPrice + InpYTP, _Digits);
@@ -217,7 +221,7 @@ void OnTick()
          targetTP = NormalizeDouble(avgPrice - InpYTP, _Digits);
          if(ask <= targetTP) shouldCloseNow = true;
         }
-      
+
       // Fechamento de Emergência Híbrido (A mercado)
       if(shouldCloseNow)
         {
@@ -230,10 +234,10 @@ void OnTick()
               }
            }
          Print("Alvo atingido! Posições fechadas a mercado.");
-         Comment(""); 
-         return; 
+         Comment("");
+         return;
         }
-        
+
       // Modificação Dinâmica de TP (Coloca o TP no servidor)
       for(int i = PositionsTotal() - 1; i >= 0; i--)
         {
@@ -242,13 +246,13 @@ void OnTick()
            {
             double currentTP = PositionGetDouble(POSITION_TP);
             double currentSL = PositionGetDouble(POSITION_SL);
-            
+
             if(MathAbs(currentTP - targetTP) > _Point)
               {
                bool isValidTP = true;
                if(positionType == POSITION_TYPE_BUY  && targetTP <= bid + stopsLevel) isValidTP = false;
                if(positionType == POSITION_TYPE_SELL && targetTP >= ask - stopsLevel) isValidTP = false;
-               
+
                if(isValidTP)
                  {
                   trade.PositionModify(ticket, currentSL, targetTP);
@@ -259,16 +263,16 @@ void OnTick()
      }
 
    // 5. --- LÓGICA DE ENTRADA (Grade Inicial + LIMITS) ---
-   
+
    datetime currentBarTime = iTime(_Symbol, PERIOD_CURRENT, 0);
    bool can_enter_this_bar = (currentBarTime != lastTradeBarTime) || (openTrades == 0);
-   
+
    bool common_sell_rule = (bid > prev_high + InpXOffset);
    bool common_buy_rule  = (ask < prev_low - InpXOffset);
-   
+
    bool isNewsBlocking = IsNewsTime(); // Verifica o calendário
    bool isTradingTime = IsTradingTime(); // Verifica o horário de funcionamento
-   
+
    // Só tentamos nova entrada se não houver NADA ativo e se todas as condições/filtros permitirem
    if(can_enter_this_bar && openTrades == 0 && pendingOrders == 0)
      {
@@ -276,7 +280,7 @@ void OnTick()
         {
          bool short_initial = common_sell_rule;
          bool long_initial  = common_buy_rule;
-         
+
          // Executa Venda
          if(short_initial)
            {
@@ -284,7 +288,7 @@ void OnTick()
               {
                lastTradeBarTime = currentBarTime;
                Print("Short Executed. Colocando ordens LIMIT...");
-               
+
                for(int i = 1; i < InpMaxOrders; i++)
                  {
                   double limitPrice = NormalizeDouble(bid + (i * InpZStep), _Digits);
@@ -305,7 +309,7 @@ void OnTick()
               {
                lastTradeBarTime = currentBarTime;
                Print("Long Executed. Colocando ordens LIMIT...");
-               
+
                for(int i = 1; i < InpMaxOrders; i++)
                  {
                   double limitPrice = NormalizeDouble(ask - (i * InpZStep), _Digits);
@@ -326,7 +330,7 @@ void OnTick()
    string dash = "=== XAUUSD Exhaustion Grid v1.70 ===\n";
    dash += "Ordens Abertas (Ativas): " + IntegerToString(openTrades) + "\n";
    dash += "Ordens Pendentes (Limits): " + IntegerToString(pendingOrders) + "\n\n";
-   
+
    if(openTrades > 0)
      {
       dash += "Direção Atual: " + (positionType == POSITION_TYPE_BUY ? "COMPRA (Long)" : "VENDA (Short)") + "\n";
@@ -358,6 +362,6 @@ void OnTick()
          dash += "Rompeu Low Anterior + Offset? " + (common_buy_rule ? "SIM (Apto a Comprar)\n" : "NÃO\n");
         }
      }
-     
+
    Comment(dash);
   }

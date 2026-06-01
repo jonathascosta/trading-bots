@@ -1,7 +1,14 @@
-﻿//+------------------------------------------------------------------+
-//|                   FVG Block EA – XAUUSD M1  v3.80                |
 //+------------------------------------------------------------------+
-#property copyright ""
+//|  FvgBlock.mq5                                                    |
+//|  Copyright (c) 2025-2026, Jonathas Costa                         |
+//|  github.com/jonathas/trading-bots                                |
+//|                                                                  |
+//|  MIT License - free to use and modify, keeping this              |
+//|  header and copyright notice in all copies.                      |
+//+------------------------------------------------------------------+
+#property copyright "Jonathas Costa"
+#property link      "https://github.com/jonathas/trading-bots"
+
 #property version   "3.80"
 #include <Trade\Trade.mqh>
 //=== Inputs =========================================================
