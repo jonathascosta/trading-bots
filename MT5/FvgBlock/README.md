@@ -1,8 +1,8 @@
 # FvgBlock
 
 **Platform:** MetaTrader 5  
-**Version:** 3.80  
-**Last updated:** 2026-05-30
+**Version:** 3.87  
+**Last updated:** 2026-06-03
 
 ## What it does
 

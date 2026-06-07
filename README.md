@@ -10,6 +10,7 @@ trading/
 │   ├── CyclesExpertAdvisor/
 │   └── CyclesTheoryMartingale/
 └── MT5/
+    ├── AurumBlock/
     ├── Bot_Canal_Abertura/
     ├── EveryCandle/
     ├── FvgBlock/
@@ -37,6 +38,9 @@ OOP refactor of Cycles (v4.0). Same strategy, restructured into classes with swa
 ---
 
 ## MT5
+
+### [AurumBlock](MT5/AurumBlock/)
+Production-hardened evolution of FvgBlock, built for XAUUSD M1. Adds session pause windows (±15 min around Tokyo, London, NY, NYSE opens), an asymmetric news filter (135 min before / 15 min after) driven by an external CSV calendar synced from the MT5 native calendar, a bottom-left statistics dashboard, and auto lot sizing. All settings are compile-time `#define` constants — no accidental parameter changes at runtime.
 
 ### [Bot_Canal_Abertura](MT5/Bot_Canal_Abertura/)
 Intraday Opening Channel EA. Reads the first 4 candles of each day to define a range, then places pending orders at ±1× range. Moves to break-even at 50% of the target distance. On a losing trade, reverses direction and doubles the lot up to a configurable number of times ("Viradas").

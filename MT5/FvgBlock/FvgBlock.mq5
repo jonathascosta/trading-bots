@@ -9,7 +9,7 @@
 #property copyright "Jonathas Costa"
 #property link      "https://github.com/jonathas/trading-bots"
 
-#property version   "3.80"
+#property version   "3.87"
 #include <Trade\Trade.mqh>
 //=== Inputs =========================================================
 input group  "=== FVG Settings ==="
@@ -76,6 +76,10 @@ datetime g_prevBlockTime = 0;
 #define N_LOTW  "FVG_LOTW"
 #define N_SIZE  "FVG_SIZE"
 #define N_PFX   "FVG_"
+// Web-panel pause flag — written by the Python web app to the MT5 common files folder.
+// MQL5 path: FILE_COMMON → %APPDATA%\MetaQuotes\Terminal\Common\Files\fvg_pause.flag
+// Python path: os.path.join(os.environ['APPDATA'],'MetaQuotes','Terminal','Common','Files','fvg_pause.flag')
+#define PAUSE_FILE "fvg_pause.flag"
 // ±15 min block window around each high-impact USD event (stored in UTC)
 #define NEWS_WINDOW 900   // 15 * 60 seconds
 
@@ -172,6 +176,12 @@ bool IsForceCloseTime()
     // Overnight window (wraps midnight): e.g. 20:45 → 01:15
     // Active when: current >= 20:45 OR current < 01:15
     return (current >= force || current < start);
+}
+// Returns true when the web panel has created the pause flag file.
+// Uses FILE_COMMON so the path is broker-independent and survives terminal reinstalls.
+bool IsPaused()
+{
+    return FileIsExist(PAUSE_FILE, FILE_COMMON);
 }
 void CloseAllPositions()
 {
@@ -448,6 +458,8 @@ double GetDailyProfit()
 void ManageTrade()
 {
     if(!g_initialized || g_activeIdx < 0) return;
+    // Web-panel pause: stop all trading activity but keep existing positions alive
+    if(IsPaused()) return;
     // Reset recovery mode at the start of each trading window
     if(IsTradingAllowed() && !IsForceCloseTime())
         g_noNewCycles = false;
@@ -565,58 +577,53 @@ void ManageTrade()
             // Fresh CountPositions guards against the race condition where a
             // SellLimit fill is not yet reflected in the positions pool,
             // which would cause a duplicate market Sell on the same tick.
-            if(sellPend == 0)
+            // Sell side:
+            //   1. Price below topBand  → SellLimit at topBand
+            //      If broker rejects limit (e.g. min-distance rule) → market Sell
+            //   2. Price at/above topBand → market Sell directly
+            if(sellPend == 0 && CountPositions(POSITION_TYPE_SELL) == 0)
             {
                 if(topBand > ask)
-                    g_trade.SellLimit(InpInitialLots, topBand, Symbol(), 0, midTop, ORDER_TIME_GTC, 0, "FVG_SL");
-                else if(CountPositions(POSITION_TYPE_SELL) == 0)
+                {
+                    if(!g_trade.SellLimit(InpInitialLots, topBand, Symbol(), 0, midTop, ORDER_TIME_GTC, 0, "FVG_SL"))
+                        g_trade.Sell(InpInitialLots, NULL, 0.0, 0.0, midTop, "FVG_SM");
+                }
+                else
                     g_trade.Sell(InpInitialLots, NULL, 0.0, 0.0, midTop, "FVG_SM");
             }
-            // Buy side: same logic.
-            if(buyPend == 0)
+            // Buy side:
+            //   1. Price above botBand  → BuyLimit at botBand
+            //      If broker rejects limit → market Buy
+            //   2. Price at/below botBand → market Buy directly
+            if(buyPend == 0 && CountPositions(POSITION_TYPE_BUY) == 0)
             {
                 if(botBand < bid)
-                    g_trade.BuyLimit(InpInitialLots, botBand, Symbol(), 0, midBot, ORDER_TIME_GTC, 0, "FVG_BL");
-                else if(CountPositions(POSITION_TYPE_BUY) == 0)
+                {
+                    if(!g_trade.BuyLimit(InpInitialLots, botBand, Symbol(), 0, midBot, ORDER_TIME_GTC, 0, "FVG_BL"))
+                        g_trade.Buy(InpInitialLots, NULL, 0.0, 0.0, midBot, "FVG_BM");
+                }
+                else
                     g_trade.Buy(InpInitialLots, NULL, 0.0, 0.0, midBot, "FVG_BM");
             }
         }
     }
     else if(g_state == STATE_PENDING)
     {
-        // For each pending limit: if the recalculated price is still a valid
-        // limit price, update it normally.  If the block has grown so that the
-        // entry zone is already inside the current market, the limit can no
-        // longer sit there — cancel it and enter at market instead.
+        // Keep the pending limit alive and let MT5 fill it naturally.
+        // Only update its price while it is still a valid limit (price not yet
+        // reached). If the zone has advanced past the current market, stop
+        // updating — the limit sits where it is and fills when price arrives.
+        // We never cancel a pending limit here; that avoids the race condition
+        // where a cancel + immediate market order produced duplicate positions.
         if(sellPend > 0)
         {
-            if(topBand > ask)
-            {
-                if(!g_tpFrozen) UpdatePendingOrder(ORDER_TYPE_SELL_LIMIT, topBand, midTop);
-            }
-            else
-            {
-                // Sell zone breached — swap limit for market order.
-                // Re-check positions in case the limit just filled this tick.
-                DeleteAllPending(ORDER_TYPE_SELL_LIMIT);
-                if(CountPositions(POSITION_TYPE_SELL) == 0)
-                    g_trade.Sell(InpInitialLots, NULL, 0.0, 0.0, midTop, "FVG_SM");
-            }
+            if(topBand > ask && !g_tpFrozen)
+                UpdatePendingOrder(ORDER_TYPE_SELL_LIMIT, topBand, midTop);
         }
         if(buyPend > 0)
         {
-            if(botBand < bid)
-            {
-                if(!g_tpFrozen) UpdatePendingOrder(ORDER_TYPE_BUY_LIMIT, botBand, midBot);
-            }
-            else
-            {
-                // Buy zone breached — swap limit for market order.
-                // Re-check positions in case the limit just filled this tick.
-                DeleteAllPending(ORDER_TYPE_BUY_LIMIT);
-                if(CountPositions(POSITION_TYPE_BUY) == 0)
-                    g_trade.Buy(InpInitialLots, NULL, 0.0, 0.0, midBot, "FVG_BM");
-            }
+            if(botBand < bid && !g_tpFrozen)
+                UpdatePendingOrder(ORDER_TYPE_BUY_LIMIT, botBand, midBot);
         }
     }
     else if(g_state == STATE_SELLS)
@@ -759,10 +766,13 @@ void UpdateVisuals()
     ObjectSetInteger(0, N_SIZE, OBJPROP_BACK,       false);
     ObjectSetInteger(0, N_SIZE, OBJPROP_SELECTABLE, false);
     ObjectSetInteger(0, N_SIZE, OBJPROP_HIDDEN,     true);
-    // Corner info label
-    string infoText = valid
+    // Corner info label — prefixed with [PAUSED] in red when web panel has paused the EA
+    bool   paused   = IsPaused();
+    string boxDesc  = valid
         ? StringFormat("Box  %.2f – %.2f  [ %.1f pips ]", bH, bL, pips)
         : StringFormat("Box  %.2f – %.2f  [ %.1f / %.0f pips ]", bH, bL, pips, InpBlkMinSize);
+    string infoText = paused ? ("⏸ PAUSED   " + boxDesc) : boxDesc;
+    color  infoColor = paused ? clrRed : cLabel;
     if(ObjectFind(0, N_INFO) < 0)
         ObjectCreate(0, N_INFO, OBJ_LABEL, 0, 0, 0);
     ObjectSetString (0, N_INFO, OBJPROP_TEXT,       infoText);
@@ -770,7 +780,7 @@ void UpdateVisuals()
     ObjectSetInteger(0, N_INFO, OBJPROP_XDISTANCE,  8);
     ObjectSetInteger(0, N_INFO, OBJPROP_YDISTANCE,  20);
     ObjectSetInteger(0, N_INFO, OBJPROP_FONTSIZE,   10);
-    ObjectSetInteger(0, N_INFO, OBJPROP_COLOR,      cLabel);
+    ObjectSetInteger(0, N_INFO, OBJPROP_COLOR,      infoColor);
     ObjectSetInteger(0, N_INFO, OBJPROP_SELECTABLE, false);
     ObjectSetInteger(0, N_INFO, OBJPROP_HIDDEN,     true);
     // Lot recommendation label (second line, YDISTANCE=40)
