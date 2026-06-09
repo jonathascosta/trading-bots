@@ -1,19 +1,20 @@
 //+------------------------------------------------------------------+
 //|  AurumBlock.mq5                                                  |
-//|  Copyright (c) 2025-2026, Jonathas Costa                         |
-//|  github.com/jonathas/trading-bots                                |
+//|  Copyright (c) 2026, Jonathas Costa                              |
+//|  github.com/jonathascosta/trading-bots                           |
 //|                                                                  |
 //|  MIT License - free to use and modify, keeping this              |
 //|  header and copyright notice in all copies.                      |
 //+------------------------------------------------------------------+
 #property copyright "Jonathas Costa"
-#property link      "https://github.com/jonathas/trading-bots"
-
-#property version   "1.03"
+#property link      "https://github.com/jonathascosta/trading-bots"
+#property version   "1.08"
 #include <Trade\Trade.mqh>
 
-//=== External input ===================================================
-input double InpFixedLots = 0.0;   // Fixed lot size (0 = auto by balance)
+//=== External inputs ==================================================
+input double InpFixedLots    = 0.0;    // Fixed lot size (0 = auto by balance)
+input double InpMinOrderDist = 130.0;  // Min distance to double position (pips)
+input int    InpUIScale      = 1;      // Dashboard scale: 1=normal, 2=Mac HiDPI/Retina
 
 //=== Strategy constants (compile-time only) ===========================
 #define FVG_MIN_SIZE        0.0
@@ -22,7 +23,6 @@ input double InpFixedLots = 0.0;   // Fixed lot size (0 = auto by balance)
 #define PIP_VALUE           0.10
 #define BARS_FUTURE         50
 // Initial lot: controlled by InpFixedLots input (see GetLots() below).
-#define MIN_ORDER_DIST      130.0
 #define COST_PER_LOT        0.06        // Round-trip cost per 0.01 lot ($)
 #define MAGIC_NUMBER        20250528
 
@@ -51,6 +51,9 @@ input double InpFixedLots = 0.0;   // Fixed lot size (0 = auto by balance)
 #define NEWS_PRE_SEC        8100        // 135 min before → no new entries
 #define NEWS_POST_SEC       900         //  15 min after  → resume
 #define NEWS_FILE           "fvg_news.csv"
+#define NEXT_SESSION_WARN_MIN  60       // aviso de session pause até X min antes de começar
+#define NEXT_NEWS_WARN_MIN     90       // aviso âmbar quando pre-block começa em < X min
+#define NEXT_NEWS_SHOW_H       8        // mostra próx. notícia se event ocorre em < X horas
 
 //=== Web-panel pause flag (shared with the Flask control panel) =====
 #define PAUSE_FILE          "fvg_pause.flag"
@@ -71,6 +74,15 @@ input double InpFixedLots = 0.0;   // Fixed lot size (0 = auto by balance)
 #define C_BELOWMIN          C'210,212,218'
 #define C_BORDER            C'50,100,210'
 #define BORDER_WIDTH        1
+
+//=== Dashboard panel bitmap =========================================
+// True ARGB transparency is only achievable via ResourceCreate + OBJ_BITMAP_LABEL.
+// OBJ_RECTANGLE_LABEL ignores the alpha channel in OBJPROP_BGCOLOR on MT5.
+#define DASH_PAN_W          325     // panel width  (px)
+#define DASH_PAN_H          179     // panel height (px) — 7 rows × 24 px + margins
+#define DASH_PAN_BOT        10      // gap between panel bottom and chart bottom (px)
+#define DASH_PAN_RES        "::AurBlock_Pan"   // in-memory bitmap resource name
+#define DASH_PAN_ALPHA      225     // 0=transparent 255=opaque → 88% opacity
 
 //=== Structures =====================================================
 struct FvgBlock {
@@ -109,9 +121,11 @@ int      g_lastLoadDay   = -1;           // local day-of-year of last news reloa
 #define N_TOP    "AUR_TOP"
 #define N_BOT    "AUR_BOT"
 #define N_MBAND  "AUR_MBAND"
-#define N_INFO   "AUR_INFO"
 #define N_SIZE   "AUR_SIZE"
 #define N_DASHBG "AUR_DASH_BG"
+#define N_DASH0  "AUR_DASH_0"   // status / state row  (new)
+#define N_DASHB  "AUR_DASH_B"   // box info row        (replaces N_INFO)
+#define N_DASHN  "AUR_DASH_N"   // next-event preview row
 #define N_DASH1  "AUR_DASH_1"
 #define N_DASH2  "AUR_DASH_2"
 #define N_DASH3  "AUR_DASH_3"
@@ -436,7 +450,7 @@ void BoxDel(const string n) { if(ObjectFind(0,n)>=0) ObjectDelete(0,n); }
 void DeleteAllBoxes()
 {
     BoxDel(N_MID); BoxDel(N_MID_B); BoxDel(N_TOP);
-    BoxDel(N_BOT); BoxDel(N_MBAND); BoxDel(N_INFO); BoxDel(N_SIZE);
+    BoxDel(N_BOT); BoxDel(N_MBAND); BoxDel(N_SIZE);
 }
 
 //+------------------------------------------------------------------+
@@ -690,15 +704,19 @@ double GetDailyProfit()
 }
 
 // Returns the initial lot size for a new cycle entry.
-// If FIXED_LOTS > 0: uses that constant.
-// Otherwise: auto-scales with balance — ROUND((Balance-400)/800)/100 + 0.01
-//   $400 → 0.01 | $1200 → 0.02 | $2000 → 0.03 …  (minimum 0.01)
+// If InpFixedLots > 0: uses that value (override).
+// Otherwise: 0.01 * MAX(1; 1 + FLOOR((SQRT(2*Balance - 700) - 30) / 20; 1))
+//   $400 – 1599  → 0.01  |  $1600 – 2799 → 0.02
+//   $2800 – 4399 → 0.03  |  $4400 – 6399 → 0.04  …
 double GetLots()
 {
     if(InpFixedLots > 0.0) return InpFixedLots;
     double bal = AccountInfoDouble(ACCOUNT_BALANCE);
-    double rec = MathRound((bal - 400.0) / 800.0) / 100.0 + 0.01;
-    return NormalizeDouble(MathMax(rec, 0.01), 2);
+    double arg = 2.0 * bal - 700.0;
+    if(arg <= 0.0) return 0.01;          // balance < $350 → minimum lot
+    double step = MathFloor((MathSqrt(arg) - 30.0) / 20.0);
+    double lots = 0.01 * MathMax(1.0, 1.0 + step);
+    return NormalizeDouble(lots, 2);
 }
 
 //+------------------------------------------------------------------+
@@ -776,7 +794,7 @@ void ManageTrade()
     double midPrice= (abH+abL)/2.0;
     double midTop  = midPrice+zs;
     double midBot  = midPrice-zs;
-    double dist    = MIN_ORDER_DIST * PIP_VALUE;
+    double dist    = InpMinOrderDist * PIP_VALUE;
     int    digits  = (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS);
     double ask     = SymbolInfoDouble(Symbol(), SYMBOL_ASK);
     double bid     = SymbolInfoDouble(Symbol(), SYMBOL_BID);
@@ -919,15 +937,206 @@ void ManageTrade()
 }
 
 //+------------------------------------------------------------------+
+//|  Dashboard helpers                                               |
+//+------------------------------------------------------------------+
+
+// Format seconds as "12m30s" (< 1 h) or "1h05m" (≥ 1 h).
+string FormatTimer(long secs)
+{
+    if(secs <= 0) return "0s";
+    if(secs < 3600)
+        return StringFormat("%dm%02ds", (int)(secs / 60), (int)(secs % 60));
+    return StringFormat("%dh%02dm", (int)(secs / 3600), (int)((secs % 3600) / 60));
+}
+
+// Returns seconds until trading resumes from an active news block.
+// Fills outName with the event name. Returns -1 when not in a news block.
+long GetNewsBlockInfo(string &outName)
+{
+    datetime now = TimeCurrent() - (datetime)(SERVER_OFFSET * 3600);   // UTC
+    for(int i = 0; i < g_newsCount; i++)
+    {
+        long diff = (long)now - (long)g_newsEvents[i];
+        if(diff >= -(long)NEWS_PRE_SEC && diff <= (long)NEWS_POST_SEC)
+        {
+            outName = g_newsNames[i];
+            datetime resume = g_newsEvents[i] + (datetime)NEWS_POST_SEC;
+            long rem = (long)resume - (long)now;
+            return (rem > 0) ? rem : 0;
+        }
+    }
+    return -1;
+}
+
+// Returns seconds until trading resumes from an active session pause.
+// Fills outSession with the session name. Returns -1 when not in a session pause.
+long GetSessionPauseInfo(string &outSession)
+{
+    MqlDateTime dt;
+    TimeToStruct(LocalNow(), dt);
+    int curMin = dt.hour * 60 + dt.min;
+    int w = PAUSE_WINDOW_MIN;
+
+    int    openMin[4];
+    string names[4];
+    openMin[0] = TOKYO_H   * 60 + TOKYO_M;    names[0] = "Tokyo";
+    openMin[1] = LONDON_H  * 60 + LONDON_M;   names[1] = "London";
+    openMin[2] = NYFOREX_H * 60 + NYFOREX_M;  names[2] = "NY Forex";
+    openMin[3] = NYSE_H    * 60 + NYSE_M;      names[3] = "NYSE";
+
+    for(int i = 0; i < 4; i++)
+    {
+        if(!IsNearOpen(curMin, openMin[i], w)) continue;
+        outSession = names[i];
+        int endMin = openMin[i] + w;
+        // Remaining minutes to the end of the pause window.
+        int remMin = endMin - curMin;
+        if(remMin >  720) remMin -= 1440;
+        if(remMin < -720) remMin += 1440;
+        long remSec = (long)remMin * 60 - (long)dt.sec;
+        return (remSec > 0) ? remSec : 0;
+    }
+    return -1;
+}
+
+//+------------------------------------------------------------------+
+//  PREVIEW: quanto falta até à PRÓXIMA session pause começar.       |
+//  Só activo quando não estamos já em pausa.                         |
+//  outSession: nome da sessão                                         |
+//  Devolve segundos até ao início da pausa, ou -1 se fora da janela. |
+//+------------------------------------------------------------------+
+long GetNextSessionPauseStart(string &outSession)
+{
+    if(IsSessionPauseTime()) return -1;   // já em pausa → status row trata disso
+
+    MqlDateTime dt;
+    TimeToStruct(LocalNow(), dt);
+    int curMin = dt.hour * 60 + dt.min;
+    int curSec = dt.sec;
+
+    int    openMin[4];
+    string names[4];
+    openMin[0] = TOKYO_H   * 60 + TOKYO_M;    names[0] = "Tokyo";
+    openMin[1] = LONDON_H  * 60 + LONDON_M;   names[1] = "London";
+    openMin[2] = NYFOREX_H * 60 + NYFOREX_M;  names[2] = "NY Forex";
+    openMin[3] = NYSE_H    * 60 + NYSE_M;      names[3] = "NYSE";
+
+    long bestSecs = -1;
+
+    for(int i = 0; i < 4; i++)
+    {
+        // Pausa começa PAUSE_WINDOW_MIN antes da abertura de sessão
+        int pauseStart = openMin[i] - PAUSE_WINDOW_MIN;
+        if(pauseStart < 0) pauseStart += 1440;
+
+        // Distância circular (em frente) de curMin até pauseStart
+        int fwdMin = (pauseStart - curMin + 1440) % 1440;
+        if(fwdMin == 0 || fwdMin > NEXT_SESSION_WARN_MIN) continue;
+
+        long secs = (long)fwdMin * 60 - (long)curSec;
+        if(secs < 0) secs = 0;
+
+        if(bestSecs < 0 || secs < bestSecs)
+        {
+            bestSecs = secs;
+            outSession = names[i];
+        }
+    }
+    return bestSecs;
+}
+
+//+------------------------------------------------------------------+
+//  PREVIEW: informação sobre a próxima notícia relevante.           |
+//  outSecsToBlock: segundos até o pre-block começar (bot para)       |
+//  outSecsToEvent: segundos até ao evento em si                      |
+//  outName: nome do evento                                            |
+//  outLocalTime: hora local "HH:MM" (UTC+1)                          |
+//  Devolve true se há evento dentro de NEXT_NEWS_SHOW_H horas.       |
+//+------------------------------------------------------------------+
+bool GetNextNewsInfo(long &outSecsToBlock, long &outSecsToEvent,
+                     string &outName, string &outLocalTime)
+{
+    if(IsNewsTime()) return false;   // já em bloco → status row trata disso
+
+    datetime now = TimeCurrent() - (datetime)(SERVER_OFFSET * 3600);   // UTC
+    long showWindow = (long)NEXT_NEWS_SHOW_H * 3600;
+
+    for(int i = 0; i < g_newsCount; i++)
+    {
+        long secsToEvent = (long)g_newsEvents[i] - (long)now;
+        if(secsToEvent <= 0)          continue;   // evento passado
+        if(secsToEvent > showWindow)  break;       // array ordenado; mais longe → parar
+
+        long secsToBlock = secsToEvent - (long)NEWS_PRE_SEC;
+        if(secsToBlock < 0) continue;   // pre-block já iniciado (IsNewsTime devia ser true)
+
+        outSecsToBlock = secsToBlock;
+        outSecsToEvent = secsToEvent;
+        outName        = g_newsNames[i];
+
+        // Formatar hora do evento em local UTC+1
+        datetime localEvt = g_newsEvents[i] + (datetime)(LOCAL_OFFSET * 3600);
+        MqlDateTime evtDt;
+        TimeToStruct(localEvt, evtDt);
+        outLocalTime = StringFormat("%02d:%02d", evtDt.hour, evtDt.min);
+        return true;
+    }
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//|  Dashboard — background bitmap (call once from OnInit)           |
+//+------------------------------------------------------------------+
+// Builds an ARGB pixel buffer and registers it as an in-memory resource.
+// OBJ_BITMAP_LABEL renders this buffer with true per-pixel alpha, giving
+// a genuine semi-transparent overlay over the chart candles.
+// C'14,18,32' (dark navy) in ARGB pixel order = (A<<24)|(R<<16)|(G<<8)|B.
+void CreateDashboardBitmap()
+{
+    // Physical pixel dimensions — on HiDPI/Retina (InpUIScale=2) the bitmap is
+    // built at 2× physical resolution so it renders at the correct logical size.
+    int pw = DASH_PAN_W * InpUIScale;
+    int ph = DASH_PAN_H * InpUIScale;
+
+    uint pixels[];
+    ArrayResize(pixels, pw * ph);
+
+    // ── Body fill ─────────────────────────────────────────────────
+    uint fillPx = ((uint)DASH_PAN_ALPHA << 24) | (14u << 16) | (18u << 8) | 32u;
+    ArrayFill(pixels, 0, pw * ph, fillPx);
+
+    // ── 1-pixel cobalt border (fully opaque) ─────────────────────
+    uint brdPx = (255u << 24) | (55u << 16) | (80u << 8) | 160u;
+    for(int x = 0; x < pw; x++)
+    {
+        pixels[x]                        = brdPx;  // top edge
+        pixels[(ph - 1) * pw + x]        = brdPx;  // bottom edge
+    }
+    for(int y = 0; y < ph; y++)
+    {
+        pixels[y * pw]                   = brdPx;  // left edge
+        pixels[y * pw + pw - 1]          = brdPx;  // right edge
+    }
+
+    ResourceCreate(DASH_PAN_RES,
+                   pixels, pw, ph,
+                   0, 0, pw,
+                   COLOR_FORMAT_ARGB_RAW);
+}
+
+//+------------------------------------------------------------------+
 //|  Dashboard                                                       |
 //+------------------------------------------------------------------+
 void DashLabel(const string name, int yoff, const string text, color clr)
 {
+    // yoff and the 20px left margin are logical design values (for InpUIScale=1).
+    // Multiplying by InpUIScale converts to physical pixels on HiDPI displays,
+    // keeping labels aligned with the scaled bitmap background.
     if(ObjectFind(0, name) < 0) ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
     ObjectSetInteger(0, name, OBJPROP_CORNER,     CORNER_LEFT_LOWER);
     ObjectSetInteger(0, name, OBJPROP_ANCHOR,     ANCHOR_LEFT_LOWER);
-    ObjectSetInteger(0, name, OBJPROP_XDISTANCE,  20);
-    ObjectSetInteger(0, name, OBJPROP_YDISTANCE,  yoff);
+    ObjectSetInteger(0, name, OBJPROP_XDISTANCE,  20 * InpUIScale);
+    ObjectSetInteger(0, name, OBJPROP_YDISTANCE,  yoff * InpUIScale);
     ObjectSetString (0, name, OBJPROP_FONT,       "Consolas");
     ObjectSetInteger(0, name, OBJPROP_FONTSIZE,   9);
     ObjectSetString (0, name, OBJPROP_TEXT,       text);
@@ -938,6 +1147,50 @@ void DashLabel(const string name, int yoff, const string text, color clr)
 
 void UpdateDashboard()
 {
+    // ── State detection ──────────────────────────────────────────
+    string newsName = "", sessName = "";
+    long   newsSecs  = GetNewsBlockInfo(newsName);
+    long   sessSecs  = GetSessionPauseInfo(sessName);
+    bool   paused    = IsPaused();
+
+    string statText;
+    color  statColor;
+    if(paused)
+    {
+        statText  = "\x25A0  PAUSED  (web panel)";   // filled square
+        statColor = C'248,113,113';                   // red
+    }
+    else if(newsSecs >= 0)
+    {
+        // Truncate name to ≤18 chars so it fits the panel width
+        string shortName = (StringLen(newsName) > 18) ? StringSubstr(newsName, 0, 18) + ".." : newsName;
+        statText  = "\x25B6  NEWS  " + shortName + "   \xBB " + FormatTimer(newsSecs);
+        statColor = C'251,191,36';                    // amber
+    }
+    else if(sessSecs >= 0)
+    {
+        statText  = "\x23F8  " + sessName + " pause   \xBB " + FormatTimer(sessSecs);
+        statColor = C'251,191,36';                    // amber
+    }
+    else
+    {
+        statText  = "\x25CF  ACTIVE";
+        statColor = C'74,222,128';                    // green
+    }
+
+    // ── Box info line (replaces the old N_INFO top-left label) ───
+    string boxText;
+    if(g_activeIdx >= 0)
+    {
+        double bH = g_blocks[g_activeIdx].blockHigh;
+        double bL = g_blocks[g_activeIdx].blockLow;
+        double pips = (bH - bL) / PIP_VALUE;
+        boxText = StringFormat("Box  %.2f \x2013 %.2f   [ %.1f pips ]", bH, bL, pips);
+    }
+    else
+        boxText = "Box  \x2013 \x2013";
+
+    // ── Trade statistics ─────────────────────────────────────────
     datetime weekStart = LocalWeekStart();
     datetime dayStart  = LocalDayStart();
 
@@ -950,16 +1203,14 @@ void UpdateDashboard()
     {
         int total = HistoryDealsTotal();
 
-        // arrays for position duration tracking
         long     posId[];
         datetime posOpen[];
         datetime posClose[];
         int pc = 0;
 
-        // arrays for cycle grouping (EXIT deals)
         datetime exitTime[];
         double   exitNet[];
-        int      exitDir[];   // +1 = buy-exit (closing sell), -1 = sell-exit (closing buy)
+        int      exitDir[];
         int ec = 0;
 
         for(int i = 0; i < total; i++)
@@ -973,7 +1224,6 @@ void UpdateDashboard()
             long     pid = (long)HistoryDealGetInteger(tk, DEAL_POSITION_ID);
             datetime dt  = (datetime)HistoryDealGetInteger(tk, DEAL_TIME);
 
-            // find/create position slot
             int idx = -1;
             for(int k = 0; k < pc; k++) if(posId[k] == pid) { idx = k; break; }
             if(idx < 0)
@@ -986,7 +1236,6 @@ void UpdateDashboard()
             if(deEntry == DEAL_ENTRY_IN)
             {
                 if(posOpen[idx] == 0) posOpen[idx] = dt;
-                // Count only initial cycle entries — scale-ins use comments AUR_SS / AUR_BS
                 string cmt = HistoryDealGetString(tk, DEAL_COMMENT);
                 if(StringFind(cmt, "AUR_SS") < 0 && StringFind(cmt, "AUR_BS") < 0)
                 {
@@ -1008,10 +1257,7 @@ void UpdateDashboard()
             }
         }
 
-        // ── Cycle grouping ──────────────────────────────────────
-        // Group EXIT deals of the same direction within 30 seconds.
-        // A martingale cycle may have multiple positions closing near-simultaneously;
-        // 30 s is generous enough to catch them without merging unrelated trades.
+        // Cycle grouping: same direction within 30 seconds
         if(ec > 0)
         {
             double   curNet = exitNet[0];
@@ -1030,7 +1276,6 @@ void UpdateDashboard()
             if(curNet > 0.10) aboveCycles++; else beCycles++;
         }
 
-        // ── Position durations (first entry → last close) ───────
         for(int k = 0; k < pc; k++)
         {
             if(posOpen[k] > 0 && posClose[k] > posOpen[k])
@@ -1044,59 +1289,121 @@ void UpdateDashboard()
     }
 
     // ── Format durations ─────────────────────────────────────────
-    string sMin, sAvg, sMax;
-    if(minSec < 0)
-        sMin = "--";
-    else if(minSec < 3600)
-        sMin = StringFormat("%dm", (int)(minSec/60));
-    else
-        sMin = StringFormat("%dh%02dm", (int)(minSec/3600), (int)(minSec%3600)/60);
+    string sMin = (minSec < 0) ? "--" : (minSec < 3600)
+        ? StringFormat("%dm", (int)(minSec/60))
+        : StringFormat("%dh%02dm", (int)(minSec/3600), (int)(minSec%3600)/60);
 
     long avgSec = (durN > 0) ? (sumSec / durN) : 0;
-    if(avgSec < 3600)
-        sAvg = StringFormat("%dm", (int)(avgSec/60));
-    else
-        sAvg = StringFormat("%dh%02dm", (int)(avgSec/3600), (int)(avgSec%3600)/60);
+    string sAvg = (avgSec < 3600)
+        ? StringFormat("%dm", (int)(avgSec/60))
+        : StringFormat("%dh%02dm", (int)(avgSec/3600), (int)(avgSec%3600)/60);
 
-    if(maxSec < 3600)
-        sMax = StringFormat("%dm", (int)(maxSec/60));
-    else
-        sMax = StringFormat("%dh%02dm", (int)(maxSec/3600), (int)(maxSec%3600)/60);
+    string sMax = (maxSec < 3600)
+        ? StringFormat("%dm", (int)(maxSec/60))
+        : StringFormat("%dh%02dm", (int)(maxSec/3600), (int)(maxSec%3600)/60);
 
-    // ── Background panel ─────────────────────────────────────────
-    // Solid dark card — readable on any chart background (light or dark).
-    if(ObjectFind(0, N_DASHBG) < 0) ObjectCreate(0, N_DASHBG, OBJ_RECTANGLE_LABEL, 0, 0, 0);
-    ObjectSetInteger(0, N_DASHBG, OBJPROP_CORNER,      CORNER_LEFT_LOWER);
-    ObjectSetInteger(0, N_DASHBG, OBJPROP_ANCHOR,      ANCHOR_LEFT_LOWER);
-    ObjectSetInteger(0, N_DASHBG, OBJPROP_XDISTANCE,   10);
-    ObjectSetInteger(0, N_DASHBG, OBJPROP_YDISTANCE,   10);
-    ObjectSetInteger(0, N_DASHBG, OBJPROP_XSIZE,       295);
-    ObjectSetInteger(0, N_DASHBG, OBJPROP_YSIZE,       106);
-    ObjectSetInteger(0, N_DASHBG, OBJPROP_BGCOLOR,     C'22,27,40');   // deep navy
-    ObjectSetInteger(0, N_DASHBG, OBJPROP_BORDER_TYPE, BORDER_FLAT);
-    ObjectSetInteger(0, N_DASHBG, OBJPROP_COLOR,       C'55,80,135'); // cobalt border
-    ObjectSetInteger(0, N_DASHBG, OBJPROP_BACK,        false);
-    ObjectSetInteger(0, N_DASHBG, OBJPROP_SELECTABLE,  false);
-    ObjectSetInteger(0, N_DASHBG, OBJPROP_HIDDEN,      true);
+    // ── Background panel (OBJ_BITMAP_LABEL — true ARGB transparency) ──
+    // Bitmap built once in OnInit() by CreateDashboardBitmap().
+    // CORNER_LEFT_UPPER + dynamic Y pins the panel to the chart bottom
+    // regardless of chart window height, avoiding the CORNER_LEFT_LOWER
+    // anchor ambiguity that caused the thin dark bar in earlier builds.
+    if(ObjectFind(0, N_DASHBG) < 0)
+    {
+        ObjectCreate(0, N_DASHBG, OBJ_BITMAP_LABEL, 0, 0, 0);
+        ObjectSetString (0, N_DASHBG, OBJPROP_BMPFILE,    DASH_PAN_RES);
+        ObjectSetInteger(0, N_DASHBG, OBJPROP_CORNER,     CORNER_LEFT_UPPER);
+        ObjectSetInteger(0, N_DASHBG, OBJPROP_BACK,       false);
+        ObjectSetInteger(0, N_DASHBG, OBJPROP_SELECTABLE, false);
+        ObjectSetInteger(0, N_DASHBG, OBJPROP_HIDDEN,     true);
+    }
+    // Pin to bottom: top edge = chartHeight − gap − physicalBitmapHeight.
+    // All pixel offsets are multiplied by InpUIScale so the bitmap and its
+    // labels share the same coordinate space on HiDPI/Retina displays.
+    long chartH = ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS);
+    int  panTop = (int)MathMax(0, chartH - DASH_PAN_BOT * InpUIScale - DASH_PAN_H * InpUIScale);
+    ObjectSetInteger(0, N_DASHBG, OBJPROP_XDISTANCE, 10 * InpUIScale);
+    ObjectSetInteger(0, N_DASHBG, OBJPROP_YDISTANCE, panTop);
 
-    // ── Text lines (bottom-up) ───────────────────────────────────
-    // Colours: amber-gold title | steel-blue stats | green positive
-    color cGold  = C'210,165,50';    // amber gold — readable on dark navy
-    color cStat  = C'160,180,210';   // steel blue — secondary stats
-    color cGreen = C'75,200,120';    // emerald — above breakeven
-    color cDim   = C'100,120,155';   // dimmed — breakeven (neutral)
+    // ── Colour palette ───────────────────────────────────────────
+    color cGold  = C'255,200,60';    // cycle counts   — bright amber-gold
+    color cBlue  = C'160,205,255';   // durations      — bright sky-blue
+    color cGreen = C'80,235,140';    // acima BE       — vivid emerald
+    color cDim   = C'150,165,190';   // breakeven      — medium slate (was too dark)
+    color cLabel = C'130,148,172';   // row labels     — visible on dark panel
 
-    DashLabel(N_DASH1, 90,
-        StringFormat("Ciclos  hoje: %d    semana: %d", ciclosToday, ciclosWeek),
+    // ── 7 label rows (YDISTANCE measured from panel bottom) ──────
+    // Row 0 — status / state  (deslocado para y=169 para dar lugar à nova linha)
+    DashLabel(N_DASH0, 169, statText, statColor);
+
+    // Row N — próximo evento (session pause ou notícia)
+    // Prioridade: session pause iminente > pre-block iminente > notícia informativa
+    string nextText  = "";
+    color  nextColor = cLabel;
+    {
+        string nextSess = "";
+        long sessSecs = GetNextSessionPauseStart(nextSess);
+
+        long newsBlock = -1, newsEvent = -1;
+        string newsName = "", newsTime = "";
+        bool hasNews = GetNextNewsInfo(newsBlock, newsEvent, newsName, newsTime);
+
+        // Truncar nome a 15 caracteres para caber na linha
+        string shortNews = (hasNews && StringLen(newsName) > 15)
+                           ? StringSubstr(newsName, 0, 15) + ".." : newsName;
+
+        if(sessSecs >= 0 && (newsBlock < 0 || sessSecs <= newsBlock))
+        {
+            // Session pause é o evento mais urgente
+            nextText  = "\x25B8  \x23F8 " + nextSess + " pause  em " + FormatTimer(sessSecs);
+            nextColor = C'251,191,36';   // âmbar
+        }
+        else if(hasNews && newsBlock >= 0 && newsBlock < (long)NEXT_NEWS_WARN_MIN * 60)
+        {
+            // Pre-block começa em < NEXT_NEWS_WARN_MIN → aviso âmbar
+            // "▸ NEWS NFP 15:30  para em 45m"
+            nextText  = "\x25B8  NEWS " + shortNews + " " + newsTime
+                        + "  para em " + FormatTimer(newsBlock);
+            nextColor = C'251,191,36';   // âmbar
+        }
+        else if(hasNews)
+        {
+            // Notícia dentro de NEXT_NEWS_SHOW_H horas — informativo (dim)
+            // "◦ NFP 15:30  em 3h05m"
+            nextText  = "\x25E6  " + shortNews + " " + newsTime
+                        + "  em " + FormatTimer(newsEvent);
+            nextColor = cLabel;
+        }
+        else if(sessSecs >= 0)
+        {
+            // Session pause dentro da janela mas mais urgente já foi tratado acima
+            nextText  = "\x25B8  \x23F8 " + nextSess + " pause  em " + FormatTimer(sessSecs);
+            nextColor = C'251,191,36';
+        }
+        // else: sem eventos à vista → linha fica vazia
+    }
+    DashLabel(N_DASHN, 145, nextText, nextColor);
+
+    // Row B — box info
+    DashLabel(N_DASHB, 121, boxText, cLabel);
+
+    // Row 1 — ciclos
+    DashLabel(N_DASH1, 93,
+        StringFormat("Ciclos   hoje \x2191 %d   \x2502   semana \x2191 %d", ciclosToday, ciclosWeek),
         cGold);
-    DashLabel(N_DASH2, 66,
-        StringFormat("Tempo   %s / %s / %s  (min/avg/max)", sMin, sAvg, sMax),
-        cStat);
-    DashLabel(N_DASH3, 42,
-        StringFormat("Breakeven   %d ciclos", beCycles),
+
+    // Row 2 — durations
+    DashLabel(N_DASH2, 69,
+        StringFormat("Duração  min %s \xB7 avg %s \xB7 max %s", sMin, sAvg, sMax),
+        cBlue);
+
+    // Row 3 — breakeven
+    DashLabel(N_DASH3, 45,
+        StringFormat("Breakeven    %d ciclos", beCycles),
         cDim);
-    DashLabel(N_DASH4, 18,
-        StringFormat("Acima BE    %d ciclos", aboveCycles),
+
+    // Row 4 — acima BE
+    DashLabel(N_DASH4, 21,
+        StringFormat("Acima BE     %d ciclos", aboveCycles),
         cGreen);
 }
 
@@ -1158,27 +1465,7 @@ void UpdateVisuals()
     ObjectSetInteger(0, N_SIZE, OBJPROP_SELECTABLE, false);
     ObjectSetInteger(0, N_SIZE, OBJPROP_HIDDEN,     true);
 
-    // Corner info label — status prefix
-    bool   paused = IsPaused();
-    string boxDesc = valid
-        ? StringFormat("Box  %.2f – %.2f  [ %.1f pips ]", bH, bL, pips)
-        : StringFormat("Box  %.2f – %.2f  [ %.1f / %.0f pips ]", bH, bL, pips, BLK_MIN_SIZE);
-    string status = "";
-    color  infoColor = cLabel;
-    if(paused)                  { status = "⏸ PAUSED   ";        infoColor = clrRed; }
-    else if(IsSessionPauseTime()){ status = "⏸ SESSION PAUSE   "; infoColor = clrYellow; }
-    else if(IsNewsTime())       { status = "📰 NEWS BLOCK   ";    infoColor = clrYellow; }
-    string infoText = status + boxDesc;
-    if(ObjectFind(0, N_INFO) < 0) ObjectCreate(0, N_INFO, OBJ_LABEL, 0, 0, 0);
-    ObjectSetString (0, N_INFO, OBJPROP_TEXT,       infoText);
-    ObjectSetInteger(0, N_INFO, OBJPROP_CORNER,     CORNER_LEFT_UPPER);
-    ObjectSetInteger(0, N_INFO, OBJPROP_XDISTANCE,  8);
-    ObjectSetInteger(0, N_INFO, OBJPROP_YDISTANCE,  20);
-    ObjectSetInteger(0, N_INFO, OBJPROP_FONTSIZE,   10);
-    ObjectSetInteger(0, N_INFO, OBJPROP_COLOR,      infoColor);
-    ObjectSetInteger(0, N_INFO, OBJPROP_SELECTABLE, false);
-    ObjectSetInteger(0, N_INFO, OBJPROP_HIDDEN,     true);
-
+    // Status and box info are now handled entirely by UpdateDashboard().
     UpdateDashboard();
     ChartRedraw(0);
 }
@@ -1192,6 +1479,8 @@ int OnInit()
     g_botUnstable = g_topUnstable = false;
     g_state = STATE_IDLE; g_tpFrozen = false; g_noNewCycles = false; g_prevBlockTime = 0;
     g_trade.SetExpertMagicNumber(MAGIC_NUMBER);
+
+    CreateDashboardBitmap();   // build ARGB resource for the semi-transparent panel
 
     LoadNews();
     MqlDateTime d; TimeToStruct(LocalNow(), d); g_lastLoadDay = d.day_of_year;

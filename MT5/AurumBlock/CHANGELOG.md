@@ -1,5 +1,123 @@
 # AurumBlock EA — Changelog
 
+## v1.08 — 2026-06-09
+
+### Fix — Dashboard HiDPI/Mac scaling (`InpUIScale`)
+
+No Mac com ecrã Retina (ou qualquer display HiDPI), o `OBJ_BITMAP_LABEL` renderiza
+o bitmap em **pixels físicos** (mapeamento 1:1), enquanto as coordenadas dos labels
+(`CORNER_LEFT_LOWER`, `YDISTANCE`) usam **pixels lógicos** (já escalados pelo sistema).
+Resultado: o fundo aparecia com metade do tamanho visual e as letras "vazavam" para fora.
+
+**Solução:** novo parâmetro de input `InpUIScale` (padrão = 1).
+
+| Valor | Quando usar |
+|---|---|
+| `1` | Windows / Mac ecrã não-Retina (comportamento anterior) |
+| `2` | Mac com ecrã Retina / HiDPI 1920 × 1080 |
+
+Com `InpUIScale = 2`:
+- O bitmap é criado com `DASH_PAN_W × 2` por `DASH_PAN_H × 2` pixels físicos  
+  → no ecrã Retina ocupa exactamente `DASH_PAN_W × DASH_PAN_H` pixels lógicos ✓  
+- As coordenadas dos labels (`XDISTANCE`, `YDISTANCE`) são multiplicadas por 2  
+  → permanecem alinhados dentro do bitmap ✓  
+- O posicionamento do painel (`panTop`) usa `DASH_PAN_H × InpUIScale`  
+  → o fundo cola-se correctamente à margem inferior do gráfico ✓
+
+**Sem impacto na lógica de trading** — apenas visual.
+
+---
+
+## v1.07 — 2026-06-09
+
+### Dashboard — linha de previsão de próximo evento
+
+Nova linha no dashboard (entre o estado e a info do bloco) que avisa
+antecipadamente quando o bot vai parar, antes de acontecer.
+
+**Três modos de display (prioridade decrescente):**
+
+| Situação | Texto | Cor |
+|---|---|---|
+| Session pause começa em < 60 min | `▸ ⏸ NY Forex pause  em 23m` | Âmbar |
+| Pre-block de notícia começa em < 90 min | `▸ NEWS NFP 15:30  para em 45m` | Âmbar |
+| Notícia dentro de 8 horas (informativo) | `◦ NFP 15:30  em 3h05m` | Dim |
+| Sem eventos próximos | *(linha vazia)* | — |
+
+**Novas funções:** `GetNextSessionPauseStart()` · `GetNextNewsInfo()`
+
+**Ajustes de layout:** `DASH_PAN_H` 155 → 179 px · `N_DASH0` y=145 → y=169 · `N_DASHN` novo em y=145
+
+---
+
+## v1.06 — 2026-06-07
+
+### Change — `InpMinOrderDist` external input
+
+`MIN_ORDER_DIST` (previously a compile-time `#define` of 130.0 pips) is now an
+external input parameter, allowing changes directly in the Strategy Tester
+without recompiling.
+
+- Default: **130.0 pips** (behaviour unchanged)
+- Appears in the EA parameter dialog as **"Min distance to double position (pips)"**
+- Used in backtests via the Optimisation tab to find the best martingale distance
+
+---
+
+## v1.05 — 2026-06-07
+
+### Change — `GetLots()` formula
+
+Replaced the linear balance formula with a square-root curve that grows more
+slowly and stays at 0.01 lot for longer, protecting smaller accounts:
+
+```
+lots = 0.01 × MAX(1;  1 + FLOOR( (√(2×Balance − 700) − 30) / 20 ;  1))
+```
+
+| Balance range | Lots |
+|---|---|
+| < $1 600 | 0.01 |
+| $1 600 – $2 799 | 0.02 |
+| $2 800 – $4 399 | 0.03 |
+| $4 400 – $6 399 | 0.04 |
+
+Previous formula (`ROUND((Balance−400)/800)/100 + 0.01`) scaled more
+aggressively (0.02 from $800, 0.03 from $1 600).
+
+`InpFixedLots > 0` continues to override the formula unconditionally.
+
+---
+
+## v1.04 — 2026-06-07
+
+### Dashboard — unified panel with countdown timer
+
+**Consolidated**: the separate top-left status label (`N_INFO`) is removed. All
+information now lives in a single bottom-left panel — no scattered labels.
+
+**Status row** (top of panel): shows the bot's current state with a colour-coded dot:
+- `◉ ACTIVE` — green
+- `▶ NEWS  <EventName>  » 12m30s` — amber, with event name and countdown to resume
+- `⏸ <Session> pause  » 8m15s` — amber, with session name and countdown to resume
+- `■ PAUSED (web panel)` — red
+
+**Box info row**: directly below the status row, shows the active FVG block's
+high/low/size (`Box 4331.08 – 4325.56 [ 55.2 pips ]`).
+
+**Timer logic**:
+- `GetNewsBlockInfo()` — returns seconds until `event_time + NEWS_POST_SEC` and event name
+- `GetSessionPauseInfo()` — returns seconds until `sessionOpen + PAUSE_WINDOW_MIN` and session name
+- `FormatTimer()` — `< 1 h` → `"12m30s"`; `≥ 1 h` → `"1h05m"`
+
+**Visual**:
+- Panel size: 325 × 155 px (was 295 × 106 px)
+- Background: `ColorToARGB(C'10,13,24', 220)` — true semi-transparent dark glass
+- Border: `C'55,80,160'` cobalt
+- Row spacing: 24 px, YDISTANCE 145 / 121 / 93 / 69 / 45 / 21
+
+---
+
 ## v1.03 — 2026-06-04
 
 ### Change

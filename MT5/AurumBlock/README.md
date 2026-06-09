@@ -1,8 +1,8 @@
 # AurumBlock
 
 **Platform:** MetaTrader 5  
-**Version:** 1.03  
-**Last updated:** 2026-06-04  
+**Version:** 1.08  
+**Last updated:** 2026-06-09  
 **Based on:** [FvgBlock](../FvgBlock/) v3.87
 
 ## What it does
@@ -52,41 +52,43 @@ Both high-impact (red) and moderate-impact (orange) events on the whitelist are 
 ## Lot sizing
 
 ```
-lot = ROUND((Balance − 400) / 800) / 100 + 0.01
+lot = 0.01 × MAX(1;  1 + FLOOR( (√(2×Balance − 700) − 30) / 20 ))
 ```
 
-| Balance | Auto lot |
+Square-root curve — grows more slowly than the previous linear formula, keeping 0.01 lot for longer on smaller accounts:
+
+| Balance range | Auto lot |
 |---|---|
-| $400 | 0.01 |
-| $1 200 | 0.02 |
-| $2 000 | 0.03 |
+| < $1 600 | 0.01 |
+| $1 600 – $2 799 | 0.02 |
+| $2 800 – $4 399 | 0.03 |
+| $4 400 – $6 399 | 0.04 |
 
 Set `InpFixedLots > 0` to override with a fixed lot without recompiling. Scale-in lots always double the previous position's lot regardless of this setting.
 
 ## Dashboard (bottom-left)
 
-Dark navy card showing per-session stats:
+Semi-transparent dark navy card (88% opacity, true ARGB bitmap). Rows top to bottom:
 
+- **Status row** — current state: `● ACTIVE` (green), `▶ NEWS <name> » Xm` (amber), `⏸ <Session> pause » Xm` (amber), `■ PAUSED` (red)
+- **Next event row** — upcoming pause/news preview: amber when < 90 min to news pre-block or < 60 min to session pause; dim informational when event is within 8 h
+- **Box row** — active FVG block range and pip size
 - **Ciclos hoje / semana** — initial cycle entries only (scale-ins excluded)
 - **Tempo mín / avg / máx** — per closed position duration
 - **Breakeven** — cycles with net P&L ≤ $0.10 after costs
 - **Acima BE** — cycles with net P&L > $0.10
 
-## Status label (top-left)
-
-| Label | Meaning |
-|---|---|
-| `⏸ PAUSED` (red) | Web panel pause flag active (`fvg_pause.flag`) |
-| `⏸ SESSION PAUSE` (yellow) | Within ±15 min of a session open |
-| `📰 NEWS BLOCK` (yellow) | Within news filter window |
+Set `InpUIScale = 2` on Mac Retina / HiDPI displays to prevent the bitmap from rendering at half the logical size.
 
 ## Configuration
 
-All settings are `#define` constants — change them and recompile. The only runtime input is:
+Most settings are `#define` constants — change them and recompile. The runtime inputs are:
 
 | Input | Default | Description |
 |---|---|---|
 | `InpFixedLots` | 0.0 | Fixed initial lot (0 = auto by balance formula) |
+| `InpMinOrderDist` | 130.0 | Pips between scale-in levels (was `#define`, now tunable at runtime / in optimizer) |
+| `InpUIScale` | 1 | Dashboard scale: `1` = Windows / non-Retina Mac; `2` = Mac Retina / HiDPI |
 
 Key constants (edit in source before compiling):
 
@@ -94,7 +96,6 @@ Key constants (edit in source before compiling):
 |---|---|---|
 | `BLK_MIN_SIZE` | 39.0 | Min block size in pips |
 | `ZONE_PCT` | 5.0 | Entry zone as % of block |
-| `MIN_ORDER_DIST` | 130.0 | Pips between scale-in levels |
 | `COST_PER_LOT` | 0.06 | Round-trip cost per 0.01 lot |
 | `PAUSE_WINDOW_MIN` | 15 | Minutes blocked around session opens |
 | `NEWS_PRE_SEC` | 8100 | Seconds before event to block (135 min) |
