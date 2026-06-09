@@ -1,5 +1,27 @@
 # AurumBlock EA — Changelog
 
+## v1.09 — 2026-06-09
+
+### Fix — `SyncCalendarToFile()` dedup e whitelist
+
+**Problema:** o MT5 calendar devolve por vezes dois entries para o mesmo evento
+(nomes ligeiramente diferentes ou horas com offset errado), resultando em duplicados
+no CSV que faziam o bot bloquear duas vezes pelo mesmo evento.
+
+**Dedup melhorado:** em vez de comparar apenas o datetime exacto, passa a comparar
+por **data + nome normalizado (case-insensitive)**:
+- Mesmo evento no mesmo dia → duplicado ignorado
+- Mesmo evento, hora mais tarde → hora corrigida para a mais cedo (resolve entradas
+  com +3 h causadas pelo bug do `SERVER_OFFSET` em versões anteriores)
+
+**Whitelist expandida:** adicionados `"existing home sales"` e `"new home sales"`
+para serem incluídos automaticamente na sincronização.
+
+**CSV regenerado:** o ficheiro `fvg_news.csv` foi apagado para forçar uma
+regeneração limpa na próxima execução do EA.
+
+---
+
 ## v1.08 — 2026-06-09
 
 ### Fix — Dashboard HiDPI/Mac scaling (`InpUIScale`)

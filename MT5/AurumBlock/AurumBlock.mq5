@@ -8,7 +8,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Jonathas Costa"
 #property link      "https://github.com/jonathascosta/trading-bots"
-#property version   "1.08"
+#property version   "1.09"
 #include <Trade\Trade.mqh>
 
 //=== External inputs ==================================================
@@ -217,7 +217,30 @@ void SyncCalendarToFile()
     string header[];
     int cnt = 0, hc = 0;
 
-    // 1. Read existing CSV (preserve comments + dedup existing rows)
+    // ── Helper: dedup check by (exact datetime) OR (same date + same name, case-insensitive).
+    // When a same-name duplicate is found with a DIFFERENT time, the EARLIER time wins.
+    // Returns true if the entry is a duplicate (caller should skip it).
+    // On a "same name, later time" conflict the existing entry's key is patched in-place.
+    #define CHECK_DUP(newKey, newName) \
+    { \
+        string _date = StringSubstr(newKey, 0, 10); \
+        string _norm = newName; StringToLower(_norm); \
+        bool _dup = false; \
+        for(int _j = 0; _j < cnt; _j++) \
+        { \
+            if(keys[_j] == newKey) { _dup = true; break; } \
+            string _ed = StringSubstr(keys[_j], 0, 10); \
+            string _en = names[_j]; StringToLower(_en); \
+            if(_ed == _date && _en == _norm) \
+            { \
+                if(newKey < keys[_j]) keys[_j] = newKey; \
+                _dup = true; break; \
+            } \
+        } \
+        if(_dup) continue; \
+    }
+
+    // 1. Read existing CSV (preserve comments; dedup by date+name, keep earlier time)
     int fh = FileOpen(NEWS_FILE, FILE_READ | FILE_ANSI | FILE_COMMON | FILE_TXT);
     if(fh != INVALID_HANDLE)
     {
@@ -231,9 +254,7 @@ void SyncCalendarToFile()
             if(StringLen(line) < 16) continue;
             string key = StringSubstr(line, 0, 16);
             string nm  = (StringLen(line) > 17) ? StringSubstr(line, 17) : "";
-            bool dup = false;
-            for(int j = 0; j < cnt; j++) if(keys[j] == key) { dup = true; break; }
-            if(dup) continue;
+            CHECK_DUP(key, nm)
             ArrayResize(keys, cnt+1); ArrayResize(names, cnt+1);
             keys[cnt] = key; names[cnt] = nm; cnt++;
         }
@@ -261,6 +282,8 @@ void SyncCalendarToFile()
         "gdp", "gross domestic product",
         "durable goods",
         "retail sales",
+        // Housing (orange) — moves gold via USD rate expectations
+        "existing home sales", "new home sales",
         // Activity (red + orange)
         "ism manufacturing", "ism non-manufacturing", "ism services",
         // Fed (red + orange)
@@ -292,12 +315,12 @@ void SyncCalendarToFile()
         // Confirmed 2026.06.03: events came in UTC+3 (server), 3h ahead of true UTC.
         datetime utc = values[i].time - (datetime)(SERVER_OFFSET * 3600);
         string key = TimeToString(utc, TIME_DATE | TIME_MINUTES);  // "YYYY.MM.DD HH:MM"
-        bool dup = false;
-        for(int j = 0; j < cnt; j++) if(keys[j] == key) { dup = true; break; }
-        if(dup) continue;
+        CHECK_DUP(key, ev.name)
         ArrayResize(keys, cnt+1); ArrayResize(names, cnt+1);
         keys[cnt] = key; names[cnt] = ev.name; cnt++; added++;
     }
+
+    #undef CHECK_DUP
 
     if(added == 0 && hc > 0)
     {
