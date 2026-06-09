@@ -1,7 +1,7 @@
 # AurumBlock
 
 **Platform:** MetaTrader 5  
-**Version:** 1.09  
+**Version:** 1.14  
 **Last updated:** 2026-06-09  
 **Based on:** [FvgBlock](../FvgBlock/) v3.87
 
@@ -68,17 +68,30 @@ Set `InpFixedLots > 0` to override with a fixed lot without recompiling. Scale-i
 
 ## Dashboard (bottom-left)
 
-Semi-transparent dark navy card (88% opacity, true ARGB bitmap). Rows top to bottom:
+Semi-transparent dark navy card (88% opacity, true ARGB bitmap, 370 px wide). Rows top to bottom:
 
 - **Status row** — current state: `● ACTIVE` (green), `▶ NEWS <name> » Xm` (amber), `⏸ <Session> pause » Xm` (amber), `■ PAUSED` (red)
 - **Next event row** — upcoming pause/news preview: amber when < 90 min to news pre-block or < 60 min to session pause; dim informational when event is within 8 h
-- **Box row** — active FVG block range and pip size
+- **Box row** — active FVG block range, pip size, and per-band touch counters (`↑Nt ↓Nt`; prefixed with `!` when a band is exhausted)
 - **Ciclos hoje / semana** — initial cycle entries only (scale-ins excluded)
 - **Tempo mín / avg / máx** — per closed position duration
 - **Breakeven** — cycles with net P&L ≤ $0.10 after costs
 - **Acima BE** — cycles with net P&L > $0.10
+- **Version label** — EA version shown in dim text at the bottom-right of the panel
 
 Set `InpUIScale = 2` on Mac Retina / HiDPI displays to prevent the bitmap from rendering at half the logical size.
+
+## FVG band health and touch counting
+
+Each FVG band is coloured to indicate how many times price has touched it since the block was created:
+
+| Band colour | Meaning |
+|---|---|
+| Blue (`C_EXTREME`) | Band is clean — no touches yet |
+| Amber (`C_UNSTABLE`) | Band touched 1–2 times; entries still allowed |
+| Red (`C_OVERTOUCHED`) | Band touched ≥ `TOUCH_WARN_COUNT` (3) times; new initial entries on that side are **blocked** |
+
+Touch counts are reset when a new block is activated, or when a band expands after a large price move. The `!↑Nt` / `!↓Nt` notation in the dashboard box row shows when a band has reached the warning threshold. Scale-in positions on an already-open trade are never blocked by touch count — only new initial entries are gated.
 
 ## Configuration
 
@@ -104,6 +117,8 @@ Key constants (edit in source before compiling):
 | `FORCE_CLOSE_H/M` | 20:45 | Force-close time |
 | `SERVER_OFFSET` | 3 | Broker server UTC offset |
 | `LOCAL_OFFSET` | 1 | Local UTC offset |
+| `TOUCH_WARN_COUNT` | 3 | Touch threshold to flag a band as exhausted and block new entries |
+| `C_OVERTOUCHED` | `C'255,153,153'` | Band colour when touch count ≥ `TOUCH_WARN_COUNT` (red) |
 
 ## External files required
 

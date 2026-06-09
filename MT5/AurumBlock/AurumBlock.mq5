@@ -8,7 +8,8 @@
 //+------------------------------------------------------------------+
 #property copyright "Jonathas Costa"
 #property link      "https://github.com/jonathascosta/trading-bots"
-#property version   "1.09"
+#property version   "1.14"
+#define EA_DASH_VER "v1.14"   // shown in dashboard — update together with #property version
 #include <Trade\Trade.mqh>
 
 //=== External inputs ==================================================
@@ -70,7 +71,9 @@ input int    InpUIScale      = 1;      // Dashboard scale: 1=normal, 2=Mac HiDPI
 #define C_MIDBODY           C'224,232,247'
 #define C_EXTREME           C'194,209,242'
 #define C_MIDBAND           C'163,185,237'
-#define C_UNSTABLE          C'240,214,153'
+#define C_UNSTABLE          C'240,214,153'  // 2nd touch — amber warning (40% on white)
+#define C_OVERTOUCHED       C'255,153,153'  // 3+ touches — red warning  (40% on white)
+#define TOUCH_WARN_COUNT    3               // touches to flip to C_OVERTOUCHED
 #define C_BELOWMIN          C'210,212,218'
 #define C_BORDER            C'50,100,210'
 #define BORDER_WIDTH        1
@@ -78,7 +81,7 @@ input int    InpUIScale      = 1;      // Dashboard scale: 1=normal, 2=Mac HiDPI
 //=== Dashboard panel bitmap =========================================
 // True ARGB transparency is only achievable via ResourceCreate + OBJ_BITMAP_LABEL.
 // OBJ_RECTANGLE_LABEL ignores the alpha channel in OBJPROP_BGCOLOR on MT5.
-#define DASH_PAN_W          325     // panel width  (px)
+#define DASH_PAN_W          370     // panel width  (px)
 #define DASH_PAN_H          179     // panel height (px) — 7 rows × 24 px + margins
 #define DASH_PAN_BOT        10      // gap between panel bottom and chart bottom (px)
 #define DASH_PAN_RES        "::AurBlock_Pan"   // in-memory bitmap resource name
@@ -102,9 +105,11 @@ datetime g_activeSince   = 0;
 double   g_botRefLow = 0, g_botRefHigh = 0, g_botExtLow = 0;
 datetime g_botCreateTime = 0;
 bool     g_botUnstable   = false;
+int      g_botTouchCount = 0;   // number of bars that touched the bottom band
 double   g_topRefLow = 0, g_topRefHigh = 0, g_topExtHigh = 0;
 datetime g_topCreateTime = 0;
 bool     g_topUnstable   = false;
+int      g_topTouchCount = 0;   // number of bars that touched the top band
 CTrade   g_trade;
 EState   g_state         = STATE_IDLE;
 bool     g_tpFrozen      = false;
@@ -126,6 +131,7 @@ int      g_lastLoadDay   = -1;           // local day-of-year of last news reloa
 #define N_DASH0  "AUR_DASH_0"   // status / state row  (new)
 #define N_DASHB  "AUR_DASH_B"   // box info row        (replaces N_INFO)
 #define N_DASHN  "AUR_DASH_N"   // next-event preview row
+#define N_DASHV  "AUR_DASH_V"   // version label (top-right of panel)
 #define N_DASH1  "AUR_DASH_1"
 #define N_DASH2  "AUR_DASH_2"
 #define N_DASH3  "AUR_DASH_3"
@@ -655,19 +661,19 @@ void ProcessBar(int shift)
     if(g_activeSince != g_blocks[g_activeIdx].startTime)
     {
         g_activeSince = g_blocks[g_activeIdx].startTime;
-        g_botRefLow=abL; g_botRefHigh=bb; g_botExtLow=abL; g_botCreateTime=barTime; g_botUnstable=false;
-        g_topRefLow=tb;  g_topRefHigh=abH; g_topExtHigh=abH; g_topCreateTime=barTime; g_topUnstable=false;
+        g_botRefLow=abL; g_botRefHigh=bb; g_botExtLow=abL; g_botCreateTime=barTime; g_botUnstable=false; g_botTouchCount=0;
+        g_topRefLow=tb;  g_topRefHigh=abH; g_topExtHigh=abH; g_topCreateTime=barTime; g_topUnstable=false; g_topTouchCount=0;
     }
     else
     {
         if(barLow < g_botExtLow) {
             if((barLow+zs) >= g_botRefLow) g_botExtLow=barLow;
-            else { g_botRefLow=barLow; g_botRefHigh=barLow+zs; g_botExtLow=barLow; g_botCreateTime=barTime; g_botUnstable=false; }
-        } else if(barLow <= bb && barTime > g_botCreateTime+onePer) g_botUnstable=true;
+            else { g_botRefLow=barLow; g_botRefHigh=barLow+zs; g_botExtLow=barLow; g_botCreateTime=barTime; g_botUnstable=false; g_botTouchCount=0; }
+        } else if(barLow <= bb && barTime > g_botCreateTime+onePer) { g_botUnstable=true; g_botTouchCount++; }
         if(barHigh > g_topExtHigh) {
             if((barHigh-zs) <= g_topRefHigh) g_topExtHigh=barHigh;
-            else { g_topRefLow=barHigh-zs; g_topRefHigh=barHigh; g_topExtHigh=barHigh; g_topCreateTime=barTime; g_topUnstable=false; }
-        } else if(barHigh >= tb && barTime > g_topCreateTime+onePer) g_topUnstable=true;
+            else { g_topRefLow=barHigh-zs; g_topRefHigh=barHigh; g_topExtHigh=barHigh; g_topCreateTime=barTime; g_topUnstable=false; g_topTouchCount=0; }
+        } else if(barHigh >= tb && barTime > g_topCreateTime+onePer) { g_topUnstable=true; g_topTouchCount++; }
     }
 }
 
@@ -840,11 +846,17 @@ void ManageTrade()
 
     bool canOpen = IsTradingAllowed() && !IsNewsTime() && !IsSessionPauseTime() && !g_noNewCycles;
 
+    // A band is "exhausted" once it has been touched ≥ TOUCH_WARN_COUNT times.
+    // No new initial entries are opened on an exhausted side; the opposite side
+    // (if still valid) continues to operate normally.
+    bool topValid = !g_topUnstable || g_topTouchCount < TOUCH_WARN_COUNT;
+    bool botValid = !g_botUnstable || g_botTouchCount < TOUCH_WARN_COUNT;
+
     if(g_state == STATE_IDLE)
     {
         if(canOpen)
         {
-            if(sellPend == 0 && CountPositions(POSITION_TYPE_SELL) == 0)
+            if(topValid && sellPend == 0 && CountPositions(POSITION_TYPE_SELL) == 0)
             {
                 if(topBand > ask)
                 {
@@ -854,7 +866,7 @@ void ManageTrade()
                 else
                     g_trade.Sell(GetLots(), NULL, 0.0, 0.0, midTop, "AUR_SM");
             }
-            if(buyPend == 0 && CountPositions(POSITION_TYPE_BUY) == 0)
+            if(botValid && buyPend == 0 && CountPositions(POSITION_TYPE_BUY) == 0)
             {
                 if(botBand < bid)
                 {
@@ -1201,14 +1213,21 @@ void UpdateDashboard()
         statColor = C'74,222,128';                    // green
     }
 
-    // ── Box info line (replaces the old N_INFO top-left label) ───
+    // ── Box info line ─────────────────────────────────────────────
     string boxText;
     if(g_activeIdx >= 0)
     {
         double bH = g_blocks[g_activeIdx].blockHigh;
         double bL = g_blocks[g_activeIdx].blockLow;
         double pips = (bH - bL) / PIP_VALUE;
-        boxText = StringFormat("Box  %.2f \x2013 %.2f   [ %.1f pips ]", bH, bL, pips);
+        // Touch counters: "↑2t" = top band touched 2×, "!↓3t" = bottom exhausted
+        // Avoid mixing %s/%d in StringFormat (MQL5 quirk) — use concatenation instead.
+        string topTag = (g_topTouchCount >= TOUCH_WARN_COUNT ? "!" : "")
+                        + "\x2191" + IntegerToString(g_topTouchCount) + "t";
+        string botTag = (g_botTouchCount >= TOUCH_WARN_COUNT ? "!" : "")
+                        + "\x2193" + IntegerToString(g_botTouchCount) + "t";
+        boxText = StringFormat("Box  %.2f \x2013 %.2f  [ %.1f p ]  ", bH, bL, pips)
+                  + topTag + "  " + botTag;
     }
     else
         boxText = "Box  \x2013 \x2013";
@@ -1347,6 +1366,26 @@ void UpdateDashboard()
     ObjectSetInteger(0, N_DASHBG, OBJPROP_XDISTANCE, 10 * InpUIScale);
     ObjectSetInteger(0, N_DASHBG, OBJPROP_YDISTANCE, panTop);
 
+    // ── Version label (top-right area of panel, light colour, small font) ──
+    // Use ANCHOR_LEFT_LOWER (same as all other labels) — ANCHOR_RIGHT causes
+    // displacement in MQL5 when combined with CORNER_LEFT_LOWER.
+    // Positioned so the text starts ~50 px from the panel's right edge.
+    {
+        int vx = (20 + DASH_PAN_W - 50) * InpUIScale;
+        int vy = (DASH_PAN_BOT + DASH_PAN_H - 18) * InpUIScale;
+        if(ObjectFind(0, N_DASHV) < 0) ObjectCreate(0, N_DASHV, OBJ_LABEL, 0, 0, 0);
+        ObjectSetInteger(0, N_DASHV, OBJPROP_CORNER,     CORNER_LEFT_LOWER);
+        ObjectSetInteger(0, N_DASHV, OBJPROP_ANCHOR,     ANCHOR_LEFT_LOWER);
+        ObjectSetInteger(0, N_DASHV, OBJPROP_XDISTANCE,  vx);
+        ObjectSetInteger(0, N_DASHV, OBJPROP_YDISTANCE,  vy);
+        ObjectSetString (0, N_DASHV, OBJPROP_FONT,       "Consolas");
+        ObjectSetInteger(0, N_DASHV, OBJPROP_FONTSIZE,   8);
+        ObjectSetString (0, N_DASHV, OBJPROP_TEXT,       EA_DASH_VER);
+        ObjectSetInteger(0, N_DASHV, OBJPROP_COLOR,      C'210,220,235');
+        ObjectSetInteger(0, N_DASHV, OBJPROP_SELECTABLE, false);
+        ObjectSetInteger(0, N_DASHV, OBJPROP_HIDDEN,     true);
+    }
+
     // ── Colour palette ───────────────────────────────────────────
     color cGold  = C'255,200,60';    // cycle counts   — bright amber-gold
     color cBlue  = C'160,205,255';   // durations      — bright sky-blue
@@ -1404,7 +1443,8 @@ void UpdateDashboard()
         }
         // else: sem eventos à vista → linha fica vazia
     }
-    DashLabel(N_DASHN, 145, nextText, nextColor);
+    // Empty string shows MT5 default "Label" text — use a space instead.
+    DashLabel(N_DASHN, 145, (nextText == "" ? " " : nextText), nextColor);
 
     // Row B — box info
     DashLabel(N_DASHB, 121, boxText, cLabel);
@@ -1436,7 +1476,7 @@ void UpdateVisuals()
     if(g_activeIdx < 0)
     {
         DeleteAllBoxes();
-        g_activeSince=0; g_botUnstable=g_topUnstable=false;
+        g_activeSince=0; g_botUnstable=g_topUnstable=false; g_botTouchCount=g_topTouchCount=0;
         UpdateDashboard();
         ChartRedraw(0); return;
     }
@@ -1458,8 +1498,10 @@ void UpdateVisuals()
     {
         cBody   = C_MIDBODY;
         cBorder = C_BORDER;
-        cTop    = g_topUnstable ? C_UNSTABLE : C_EXTREME;
-        cBot    = g_botUnstable ? C_UNSTABLE : C_EXTREME;
+        cTop    = !g_topUnstable ? C_EXTREME
+                : (g_topTouchCount >= TOUCH_WARN_COUNT) ? C_OVERTOUCHED : C_UNSTABLE;
+        cBot    = !g_botUnstable ? C_EXTREME
+                : (g_botTouchCount >= TOUCH_WARN_COUNT) ? C_OVERTOUCHED : C_UNSTABLE;
         cMid    = C_MIDBAND;
         cLabel  = C_BORDER;
     }
@@ -1500,6 +1542,7 @@ int OnInit()
     ArrayResize(g_blocks, 0);
     g_activeIdx = -1; g_initialized = false; g_activeSince = 0;
     g_botUnstable = g_topUnstable = false;
+    g_botTouchCount = g_topTouchCount = 0;
     g_state = STATE_IDLE; g_tpFrozen = false; g_noNewCycles = false; g_prevBlockTime = 0;
     g_trade.SetExpertMagicNumber(MAGIC_NUMBER);
 

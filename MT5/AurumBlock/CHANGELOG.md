@@ -1,5 +1,102 @@
 # AurumBlock EA — Changelog
 
+## v1.14 — 2026-06-09
+
+### Fix — label de versão deslocado + painel mais largo
+
+**Label de versão:** `ANCHOR_RIGHT_LOWER` com `CORNER_LEFT_LOWER` causa
+deslocamento em MQL5 — substituído por `ANCHOR_LEFT_LOWER` (mesmo que todos os
+outros labels), posicionado a 50 px da margem direita do painel.
+Cor alterada de `C'70,85,110'` (escuro, sem contraste) para `C'210,220,235'`
+(cinza muito claro, legível sobre o fundo navy).
+Posição final ajustada manualmente: `vx = (20 + DASH_PAN_W - 50)`, `vy = (DASH_PAN_BOT + DASH_PAN_H - 18)`.
+
+**Painel mais largo:** `DASH_PAN_W` 325 → 370 px para dar mais espaço ao conteúdo.
+
+---
+
+## v1.13 — 2026-06-09
+
+### Visual — versão no dashboard
+
+Adicionado label `v1.13` no **canto superior direito** do painel, em fonte 7 pt e
+cor dim (`C'70,85,110'`). Discreto mas sempre visível.
+
+Para manter consistência a cada versão, actualizar os dois defines juntos:
+```mql5
+#property version   "X.XX"
+#define EA_DASH_VER "vX.XX"
+```
+
+---
+
+## v1.12 — 2026-06-09
+
+### Fix — dashboard: "non-string passed" e "Label" fantasma
+
+**"non-string passed"** na linha Box: `StringFormat` em MQL5 tem comportamento
+instável ao misturar `%s` e `%d` no mesmo formato. Substituído por concatenação
+de strings + `IntegerToString()`.
+
+**"Label" fantasma** na linha de próximo evento: quando `nextText = ""`, o
+`OBJ_LABEL` mostra o texto padrão do MT5 ("Label") em vez de ficar em branco.
+Corrigido passando `" "` (espaço) quando não há evento a mostrar.
+
+---
+
+## v1.11 — 2026-06-09
+
+### Lógica — bloqueio de entradas em banda esgotada + contadores no dashboard
+
+**Bloqueio de entradas (STATE_IDLE):**  
+Quando uma banda atinge `TOUCH_WARN_COUNT` (3) ou mais toques, o EA deixa de abrir
+novas entradas iniciais nesse lado. O lado oposto (se ainda válido) continua a operar
+normalmente. Scale-ins em posições já abertas não são afectados.
+
+```
+topValid = !g_topUnstable || g_topTouchCount < TOUCH_WARN_COUNT
+botValid = !g_botUnstable || g_botTouchCount < TOUCH_WARN_COUNT
+```
+
+**Contadores visíveis no dashboard (linha Box):**  
+A linha de informação do bloco passa a mostrar o número de toques por banda:
+
+```
+Box  3321.08 – 3315.56  [ 55.2 p ]  ↑1t ↓2t
+Box  3321.08 – 3315.56  [ 55.2 p ]  ↑1t !↓3t   ← "!" quando esgotada
+```
+
+**Comportamento do contador com crescimento do bloco:**
+- Crescimento pequeno (banda move <zs): contador persiste — histórico incremental
+- Crescimento grande (nova referência disparada): contador reseta para 0
+
+---
+
+## v1.10 — 2026-06-09
+
+### Visual — terceira cor nas margens do bloco (contador de toques)
+
+Antes: as margens eram azuis (intocadas) ou âmbar (tocadas ≥ 1×) — apenas dois estados.
+
+Agora há três estados por margem, com reset automático se a banda se expandir para um
+novo extremo (o bloco "deslocou" a sua referência):
+
+| Toques na margem | Cor da banda | Significado |
+|---|---|---|
+| 0 – 1 | Azul `C'194,209,242'` | Normal — primeira entrada |
+| 2 – N-1 | Âmbar `C'240,214,153'` | Atenção — banda já foi testada |
+| ≥ N (default 3) | Vermelho claro `C'255,153,153'` | Alerta — banda fortemente testada |
+
+**Threshold configurável:** `#define TOUCH_WARN_COUNT 3` — alterar para ajustar quantos
+toques disparam a cor vermelha.
+
+**Novos globals:** `g_botTouchCount` · `g_topTouchCount` (int, reset em novo bloco ou
+expansão de banda).
+
+**Sem impacto na lógica de trading** — apenas visual.
+
+---
+
 ## v1.09 — 2026-06-09
 
 ### Fix — `SyncCalendarToFile()` dedup e whitelist
