@@ -1,5 +1,77 @@
 # AurumBlock EA — Changelog
 
+## v1.17 — 2026-06-10
+
+### Fix — drag via CHARTEVENT_MOUSE_MOVE puro
+
+`CHARTEVENT_OBJECT_CLICK` em `OBJ_BITMAP_LABEL` não dispara de forma fiável
+no MT5. Substituído por detecção de drag inteiramente baseada em
+`CHARTEVENT_MOUSE_MOVE`:
+
+- Novo global `g_prevLBtn` — guarda o estado do botão esquerdo no evento
+  anterior, para detectar a transição `false → true` (botão acabou de ser
+  premido). Isso evita activar um drag acidental quando o utilizador já tinha
+  o botão premido noutro sítio e o cursor passa por cima do painel.
+- Drag começa quando: botão passou de não-premido para premido E cursor está
+  dentro dos limites do painel.
+- Enquanto arrasta: painel actualiza em tempo real, clamped dentro do gráfico.
+- Ao soltar: posição guardada com `GlobalVariableSet`.
+
+**Sem impacto na lógica de trading** — apenas visual.
+
+---
+
+## v1.16 — 2026-06-10
+
+### Fix — drag do painel agora funciona
+
+`CHARTEVENT_OBJECT_DRAG` nunca dispara para `OBJ_BITMAP_LABEL` (é um overlay
+de pixels, não um objecto com coordenadas de preço/tempo).
+
+**Nova implementação:**
+1. `ChartSetInteger(0, CHART_EVENT_MOUSE_MOVE, true)` em `OnInit` activa eventos
+   de rato no EA
+2. `CHARTEVENT_OBJECT_CLICK` no bitmap detecta o início do drag e guarda o
+   offset (cursor − posição do painel) para não "saltar" ao agarrar
+3. `CHARTEVENT_MOUSE_MOVE` (com botão esquerdo activo) actualiza a posição em
+   tempo real, com clamping nos limites do gráfico
+4. Ao soltar o botão, a posição é persistida com `GlobalVariableSet`
+
+Com `OBJPROP_SELECTABLE = true` o clique no painel vai ao objecto e não ao
+gráfico — o gráfico NÃO desliza enquanto o painel está a ser arrastado.
+
+**Sem impacto na lógica de trading** — apenas visual.
+
+---
+
+## v1.15 — 2026-06-10
+
+### Visual — dashboard arrastável
+
+O painel pode agora ser arrastado para qualquer posição no gráfico.
+
+**Como usar:** clicar no painel e arrastar para a posição desejada. A posição
+é guardada automaticamente em variáveis globais do terminal (`AUR_PAN_X` /
+`AUR_PAN_Y`) e restaurada quando o EA reinicia. Para repor ao canto
+inferior-esquerdo: retirar o EA e voltar a colocá-lo (ou apagar as variáveis
+globais em `Tools → Global Variables`).
+
+**Implementação:**
+- Novos globals `g_panX`, `g_panY`, `g_panDragged`
+- Nova função `EnsurePanelPos()` — calcula posição padrão (colado ao fundo)
+  quando `!g_panDragged`; não faz nada após o utilizador arrastar
+- `DashLabel()` convertida de `CORNER_LEFT_LOWER` (coords absolutas do
+  fundo do gráfico) para `CORNER_LEFT_UPPER + ANCHOR_LEFT_LOWER` com coords
+  relativas ao painel (`g_panX + 20`, `g_panY + row_offset`)
+- Bitmap do painel: `OBJPROP_SELECTABLE = true` para permitir drag
+- Novo `OnChartEvent()` — captura `CHARTEVENT_OBJECT_DRAG` no bitmap,
+  actualiza `g_panX/g_panY`, persiste com `GlobalVariableSet`, redesenha labels
+- `OnInit()` restaura posição com `GlobalVariableGet` se disponível
+
+**Sem impacto na lógica de trading** — apenas visual.
+
+---
+
 ## v1.14 — 2026-06-09
 
 ### Fix — label de versão deslocado + painel mais largo

@@ -8,8 +8,8 @@
 //+------------------------------------------------------------------+
 #property copyright "Jonathas Costa"
 #property link      "https://github.com/jonathascosta/trading-bots"
-#property version   "1.14"
-#define EA_DASH_VER "v1.14"   // shown in dashboard — update together with #property version
+#property version   "1.17"
+#define EA_DASH_VER "v1.17"   // shown in dashboard — update together with #property version
 #include <Trade\Trade.mqh>
 
 //=== External inputs ==================================================
@@ -119,6 +119,13 @@ datetime g_newsEvents[];                 // loaded from NEWS_FILE (UTC)
 string   g_newsNames[];                  // parallel array — event names
 int      g_newsCount     = 0;
 int      g_lastLoadDay   = -1;           // local day-of-year of last news reload
+int      g_panX         = -1;           // dashboard panel left edge (px from chart left)
+int      g_panY         = -1;           // dashboard panel top edge  (px from chart top)
+bool     g_panDragged   = false;        // true once user has dragged the panel
+bool     g_dragging     = false;        // true while left mouse button held over panel
+int      g_dragOffX     = 0;           // cursor X offset from panel left at drag start
+int      g_dragOffY     = 0;           // cursor Y offset from panel top  at drag start
+bool     g_prevLBtn     = false;        // left-button state on previous MOUSE_MOVE event
 
 //=== Object names ===================================================
 #define N_MID    "AUR_MID"
@@ -1120,6 +1127,21 @@ bool GetNextNewsInfo(long &outSecsToBlock, long &outSecsToEvent,
 }
 
 //+------------------------------------------------------------------+
+// Calculates the default panel position (pinned to bottom-left).
+// Called every UpdateDashboard() tick when the user has NOT dragged
+// the panel; once dragged, g_panDragged=true and the stored position
+// is used unchanged (so the panel stays wherever the user left it).
+void EnsurePanelPos()
+{
+    if(!g_panDragged)
+    {
+        long chartH = ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS);
+        g_panX = 10 * InpUIScale;
+        g_panY = (int)MathMax(0, chartH - (DASH_PAN_BOT + DASH_PAN_H) * InpUIScale);
+    }
+}
+
+//+------------------------------------------------------------------+
 //|  Dashboard — background bitmap (call once from OnInit)           |
 //+------------------------------------------------------------------+
 // Builds an ARGB pixel buffer and registers it as an in-memory resource.
@@ -1164,14 +1186,17 @@ void CreateDashboardBitmap()
 //+------------------------------------------------------------------+
 void DashLabel(const string name, int yoff, const string text, color clr)
 {
-    // yoff and the 20px left margin are logical design values (for InpUIScale=1).
-    // Multiplying by InpUIScale converts to physical pixels on HiDPI displays,
-    // keeping labels aligned with the scaled bitmap background.
+    // yoff: row baseline measured from panel BOTTOM (logical px, same scale as before).
+    // Converts to absolute chart coords: absY = panelTop + (panH - yoff_from_panBot).
+    // CORNER_LEFT_UPPER + ANCHOR_LEFT_LOWER keeps the same baseline position regardless
+    // of where the panel was dragged to.
+    int absX = g_panX + 20 * InpUIScale;
+    int absY = g_panY + (DASH_PAN_BOT + DASH_PAN_H - yoff) * InpUIScale;
     if(ObjectFind(0, name) < 0) ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
-    ObjectSetInteger(0, name, OBJPROP_CORNER,     CORNER_LEFT_LOWER);
+    ObjectSetInteger(0, name, OBJPROP_CORNER,     CORNER_LEFT_UPPER);
     ObjectSetInteger(0, name, OBJPROP_ANCHOR,     ANCHOR_LEFT_LOWER);
-    ObjectSetInteger(0, name, OBJPROP_XDISTANCE,  20 * InpUIScale);
-    ObjectSetInteger(0, name, OBJPROP_YDISTANCE,  yoff * InpUIScale);
+    ObjectSetInteger(0, name, OBJPROP_XDISTANCE,  absX);
+    ObjectSetInteger(0, name, OBJPROP_YDISTANCE,  absY);
     ObjectSetString (0, name, OBJPROP_FONT,       "Consolas");
     ObjectSetInteger(0, name, OBJPROP_FONTSIZE,   9);
     ObjectSetString (0, name, OBJPROP_TEXT,       text);
@@ -1345,36 +1370,29 @@ void UpdateDashboard()
         : StringFormat("%dh%02dm", (int)(maxSec/3600), (int)(maxSec%3600)/60);
 
     // ── Background panel (OBJ_BITMAP_LABEL — true ARGB transparency) ──
-    // Bitmap built once in OnInit() by CreateDashboardBitmap().
-    // CORNER_LEFT_UPPER + dynamic Y pins the panel to the chart bottom
-    // regardless of chart window height, avoiding the CORNER_LEFT_LOWER
-    // anchor ambiguity that caused the thin dark bar in earlier builds.
+    // EnsurePanelPos() pins the panel to the chart bottom when !g_panDragged,
+    // or keeps the user-dragged position when g_panDragged=true.
+    EnsurePanelPos();
     if(ObjectFind(0, N_DASHBG) < 0)
     {
         ObjectCreate(0, N_DASHBG, OBJ_BITMAP_LABEL, 0, 0, 0);
         ObjectSetString (0, N_DASHBG, OBJPROP_BMPFILE,    DASH_PAN_RES);
         ObjectSetInteger(0, N_DASHBG, OBJPROP_CORNER,     CORNER_LEFT_UPPER);
         ObjectSetInteger(0, N_DASHBG, OBJPROP_BACK,       false);
-        ObjectSetInteger(0, N_DASHBG, OBJPROP_SELECTABLE, false);
+        ObjectSetInteger(0, N_DASHBG, OBJPROP_SELECTABLE, true);   // draggable
         ObjectSetInteger(0, N_DASHBG, OBJPROP_HIDDEN,     true);
     }
-    // Pin to bottom: top edge = chartHeight − gap − physicalBitmapHeight.
-    // All pixel offsets are multiplied by InpUIScale so the bitmap and its
-    // labels share the same coordinate space on HiDPI/Retina displays.
-    long chartH = ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS);
-    int  panTop = (int)MathMax(0, chartH - DASH_PAN_BOT * InpUIScale - DASH_PAN_H * InpUIScale);
-    ObjectSetInteger(0, N_DASHBG, OBJPROP_XDISTANCE, 10 * InpUIScale);
-    ObjectSetInteger(0, N_DASHBG, OBJPROP_YDISTANCE, panTop);
+    ObjectSetInteger(0, N_DASHBG, OBJPROP_XDISTANCE, g_panX);
+    ObjectSetInteger(0, N_DASHBG, OBJPROP_YDISTANCE, g_panY);
 
     // ── Version label (top-right area of panel, light colour, small font) ──
-    // Use ANCHOR_LEFT_LOWER (same as all other labels) — ANCHOR_RIGHT causes
-    // displacement in MQL5 when combined with CORNER_LEFT_LOWER.
-    // Positioned so the text starts ~50 px from the panel's right edge.
+    // Panel-relative: 330 px from panel left, 18 px from panel top (baseline).
+    // Moves with the panel when dragged.
     {
-        int vx = (20 + DASH_PAN_W - 50) * InpUIScale;
-        int vy = (DASH_PAN_BOT + DASH_PAN_H - 18) * InpUIScale;
+        int vx = g_panX + (DASH_PAN_W - 40) * InpUIScale;
+        int vy = g_panY + 18 * InpUIScale;
         if(ObjectFind(0, N_DASHV) < 0) ObjectCreate(0, N_DASHV, OBJ_LABEL, 0, 0, 0);
-        ObjectSetInteger(0, N_DASHV, OBJPROP_CORNER,     CORNER_LEFT_LOWER);
+        ObjectSetInteger(0, N_DASHV, OBJPROP_CORNER,     CORNER_LEFT_UPPER);
         ObjectSetInteger(0, N_DASHV, OBJPROP_ANCHOR,     ANCHOR_LEFT_LOWER);
         ObjectSetInteger(0, N_DASHV, OBJPROP_XDISTANCE,  vx);
         ObjectSetInteger(0, N_DASHV, OBJPROP_YDISTANCE,  vy);
@@ -1544,8 +1562,19 @@ int OnInit()
     g_botUnstable = g_topUnstable = false;
     g_botTouchCount = g_topTouchCount = 0;
     g_state = STATE_IDLE; g_tpFrozen = false; g_noNewCycles = false; g_prevBlockTime = 0;
+    g_panX = -1; g_panY = -1; g_panDragged = false;
+    g_dragging = false; g_prevLBtn = false;
     g_trade.SetExpertMagicNumber(MAGIC_NUMBER);
 
+    // Restore user-dragged panel position from the previous session.
+    if(GlobalVariableCheck("AUR_PAN_X") && GlobalVariableCheck("AUR_PAN_Y"))
+    {
+        g_panX       = (int)GlobalVariableGet("AUR_PAN_X");
+        g_panY       = (int)GlobalVariableGet("AUR_PAN_Y");
+        g_panDragged = true;
+    }
+
+    ChartSetInteger(0, CHART_EVENT_MOUSE_MOVE, true);   // needed for drag detection
     CreateDashboardBitmap();   // build ARGB resource for the semi-transparent panel
 
     LoadNews();
@@ -1559,7 +1588,77 @@ int OnInit()
     g_initialized = true;
     return INIT_SUCCEEDED;
 }
-void OnDeinit(const int reason) { ObjectsDeleteAll(0, N_PFX); }
+void OnDeinit(const int reason)
+{
+    ChartSetInteger(0, CHART_EVENT_MOUSE_MOVE, false);
+    ObjectsDeleteAll(0, N_PFX);
+}
+
+// Drag the dashboard panel with the mouse.
+//
+// OBJ_BITMAP_LABEL is a pixel-positioned overlay — MT5 never fires
+// CHARTEVENT_OBJECT_DRAG or CHARTEVENT_OBJECT_CLICK reliably for it.
+// We handle everything via CHARTEVENT_MOUSE_MOVE (enabled in OnInit via
+// CHART_EVENT_MOUSE_MOVE=true):
+//
+//   lBtn just became true  +  cursor inside panel  →  start drag
+//   lBtn still true        +  dragging             →  update position live
+//   lBtn became false      +  dragging             →  stop, persist position
+//
+// g_prevLBtn tracks the previous button state so we only START a drag on
+// the exact event where the button transitions false→true, preventing a
+// spurious drag when the user scrolls the chart and the cursor enters the
+// panel while the button is already held.
+void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
+{
+    if(id != CHARTEVENT_MOUSE_MOVE) return;
+
+    int  mx   = (int)lparam;
+    int  my   = (int)dparam;
+    bool lBtn = ((int)StringToInteger(sparam) & 1) != 0;
+
+    // ── Detect drag start: button pressed for the first time inside panel ──
+    if(lBtn && !g_prevLBtn && !g_dragging)
+    {
+        if(mx >= g_panX && mx < g_panX + DASH_PAN_W * InpUIScale &&
+           my >= g_panY && my < g_panY + DASH_PAN_H * InpUIScale)
+        {
+            g_dragging   = true;
+            g_panDragged = true;
+            g_dragOffX   = mx - g_panX;
+            g_dragOffY   = my - g_panY;
+        }
+    }
+
+    // ── Move panel while dragging ──────────────────────────────────
+    if(g_dragging)
+    {
+        if(!lBtn)
+        {
+            g_dragging = false;
+            GlobalVariableSet("AUR_PAN_X", (double)g_panX);
+            GlobalVariableSet("AUR_PAN_Y", (double)g_panY);
+        }
+        else
+        {
+            long cW = ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
+            long cH = ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS);
+            g_panX = mx - g_dragOffX;
+            g_panY = my - g_dragOffY;
+            if(g_panX < 0) g_panX = 0;
+            if(g_panY < 0) g_panY = 0;
+            if(g_panX + DASH_PAN_W * InpUIScale > (int)cW)
+                g_panX = (int)cW - DASH_PAN_W * InpUIScale;
+            if(g_panY + DASH_PAN_H * InpUIScale > (int)cH)
+                g_panY = (int)cH - DASH_PAN_H * InpUIScale;
+            UpdateDashboard();
+            ChartRedraw(0);
+        }
+    }
+
+    g_prevLBtn = lBtn;
+}
+
 void OnTick()
 {
     datetime t0 = iTime(Symbol(), Period(), 0);

@@ -1,7 +1,7 @@
 # AurumBlock
 
 **Platform:** MetaTrader 5  
-**Version:** 1.14  
+**Version:** 1.17  
 **Last updated:** 2026-06-09  
 **Based on:** [FvgBlock](../FvgBlock/) v3.87
 
@@ -68,7 +68,9 @@ Set `InpFixedLots > 0` to override with a fixed lot without recompiling. Scale-i
 
 ## Dashboard (bottom-left)
 
-Semi-transparent dark navy card (88% opacity, true ARGB bitmap, 370 px wide). Rows top to bottom:
+Semi-transparent dark navy card (88% opacity, true ARGB bitmap, 370 px wide). The panel is **draggable** — click and drag it to any position on the chart; the position is saved to terminal global variables (`AUR_PAN_X` / `AUR_PAN_Y`) and restored on EA restart. To reset to the default bottom-left corner, remove and re-attach the EA (or delete those global variables via `Tools → Global Variables`).
+
+Rows top to bottom:
 
 - **Status row** — current state: `● ACTIVE` (green), `▶ NEWS <name> » Xm` (amber), `⏸ <Session> pause » Xm` (amber), `■ PAUSED` (red)
 - **Next event row** — upcoming pause/news preview: amber when < 90 min to news pre-block or < 60 min to session pause; dim informational when event is within 8 h
