@@ -1,5 +1,84 @@
 # AurumBlock EA — Changelog
 
+## v1.20 — 2026-06-11
+
+### Fix — contagem de toques por visita, não por barra
+
+**Bug:** `g_botTouchCount++` incrementava em **cada barra M1** onde
+`barLow <= bb`. Se o preço entrasse na zona e ficasse lá 3 minutos seguidos,
+o contador atingia 3 com uma única visita → a zona era invalidada sem ter
+sido tocada 3 vezes de forma independente.
+
+**Causa:** sem memória de se o preço JÁ estava na zona na barra anterior.
+
+**Correcção:** dois novos globals `g_botInZone` / `g_topInZone`.
+O contador só incrementa quando o preço **entra** na zona (transição
+fora→dentro). Enquanto o preço permanece na zona, o flag fica `true` e
+o `++` é bloqueado. Ao sair (`barLow > bb`), o flag volta a `false`,
+permitindo contar a próxima visita.
+
+```
+Antes: 3 barras seguidas em zona = 3 toques (bug)
+Agora: 3 barras seguidas em zona = 1 toque  (correcto)
+```
+
+Reset do flag também adicionado em: novo bloco detectado, extensão de banda
+grande (reset de referência), `OnInit()`, e quando `g_activeIdx < 0`.
+
+**Sem impacto na lógica de trading** — apenas a contagem para invalidação.
+
+---
+
+## v1.19 — 2026-06-11
+
+### Change — threshold único de fim de dia (19:45)
+
+`FORCE_CLOSE_H` baixou de 20 para 19, igualando `TRADE_STOP_H`.
+
+**Antes:** dois limiares separados:
+- 19:45 → para novos ciclos, cancela pendentes, **bloqueia** scale-ins
+- 20:45 → fecha se positivo; se negativo, activa scale-ins
+
+**Agora:** um único limiar em 19:45:
+- 19:45 → fecha se positivo, cancela pendentes, sem novos ciclos
+- Se negativo com posições abertas → scale-ins permitidos imediatamente
+
+**Vantagem:** elimina a "zona morta" de 1 hora onde scale-ins estavam
+bloqueados. Entrar num scale-in mais cedo (preço menos adverso) é
+matematicamente melhor do que esperar 60 min.
+
+Fechamento manual caso a posição ainda esteja negativa às 22:00+.
+
+**Sem impacto na lógica de trading** — apenas os defines de tempo.
+
+---
+
+## v1.18 — 2026-06-10
+
+### Change — multiplicador de scale-in configurável (`InpLotMultiplier`)
+
+O multiplicador de lote estava hardcoded como `2.0` (dobrar) em dois sítios
+em `ManageTrade()`. Passa a ser um input externo:
+
+```
+input double InpLotMultiplier = 2.0;   // 2=dobrar · 3=triplicar · 4=quadruplicar
+```
+
+Combinações sugeridas (com base na análise de break-even):
+
+| Multiplicador | Intervalo | BE @ L3 (ex. sell 4100) | Dist. BE (pips) |
+|---|---|---|---|
+| 2× | 130 pips | 4118.6 | 74 |
+| 3× | ~90 pips | ~4120 | ~55 |
+| 4× | ~70 pips | ~4122 | ~35 |
+
+Intervalos menores compensam a maior exposição do multiplicador agressivo.
+Optimizar via Strategy Tester com `InpMinOrderDist` e `InpLotMultiplier` em conjunto.
+
+**Sem impacto em mais nada** — apenas `newLots = lastLots × InpLotMultiplier`.
+
+---
+
 ## v1.17 — 2026-06-10
 
 ### Fix — drag via CHARTEVENT_MOUSE_MOVE puro

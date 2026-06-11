@@ -8,13 +8,14 @@
 //+------------------------------------------------------------------+
 #property copyright "Jonathas Costa"
 #property link      "https://github.com/jonathascosta/trading-bots"
-#property version   "1.17"
-#define EA_DASH_VER "v1.17"   // shown in dashboard — update together with #property version
+#property version   "1.20"
+#define EA_DASH_VER "v1.20"   // shown in dashboard — update together with #property version
 #include <Trade\Trade.mqh>
 
 //=== External inputs ==================================================
 input double InpFixedLots    = 0.0;    // Fixed lot size (0 = auto by balance)
-input double InpMinOrderDist = 130.0;  // Min distance to double position (pips)
+input double InpMinOrderDist = 130.0;  // Distance between scale-ins (pips)
+input double InpLotMultiplier = 2.0;   // Scale-in lot multiplier (2=double, 3=triple…)
 input int    InpUIScale      = 1;      // Dashboard scale: 1=normal, 2=Mac HiDPI/Retina
 
 //=== Strategy constants (compile-time only) ===========================
@@ -32,7 +33,7 @@ input int    InpUIScale      = 1;      // Dashboard scale: 1=normal, 2=Mac HiDPI
 #define TRADE_START_M       15          // 15 min after Sydney opens (~23:00)
 #define TRADE_STOP_H        19
 #define TRADE_STOP_M        45
-#define FORCE_CLOSE_H       20
+#define FORCE_CLOSE_H       19          // same as TRADE_STOP — single threshold
 #define FORCE_CLOSE_M       45
 #define SERVER_OFFSET       3           // Broker server UTC offset (UTC+3)
 #define LOCAL_OFFSET        1           // Local UTC offset (UTC+1)
@@ -105,11 +106,13 @@ datetime g_activeSince   = 0;
 double   g_botRefLow = 0, g_botRefHigh = 0, g_botExtLow = 0;
 datetime g_botCreateTime = 0;
 bool     g_botUnstable   = false;
-int      g_botTouchCount = 0;   // number of bars that touched the bottom band
+int      g_botTouchCount = 0;   // number of distinct visits to the bottom zone
+bool     g_botInZone     = false; // true while price is inside the bottom zone (prevents multi-bar double-count)
 double   g_topRefLow = 0, g_topRefHigh = 0, g_topExtHigh = 0;
 datetime g_topCreateTime = 0;
 bool     g_topUnstable   = false;
-int      g_topTouchCount = 0;   // number of bars that touched the top band
+int      g_topTouchCount = 0;   // number of distinct visits to the top zone
+bool     g_topInZone     = false; // true while price is inside the top zone
 CTrade   g_trade;
 EState   g_state         = STATE_IDLE;
 bool     g_tpFrozen      = false;
@@ -433,7 +436,7 @@ bool IsSessionPauseTime()
     return false;
 }
 
-// True from FORCE_CLOSE until trading restarts — covers 20:45 → 23:15.
+// True from FORCE_CLOSE (= TRADE_STOP = 19:45) until trading restarts at 23:15.
 bool IsForceCloseTime()
 {
     MqlDateTime dt;
@@ -668,19 +671,29 @@ void ProcessBar(int shift)
     if(g_activeSince != g_blocks[g_activeIdx].startTime)
     {
         g_activeSince = g_blocks[g_activeIdx].startTime;
-        g_botRefLow=abL; g_botRefHigh=bb; g_botExtLow=abL; g_botCreateTime=barTime; g_botUnstable=false; g_botTouchCount=0;
-        g_topRefLow=tb;  g_topRefHigh=abH; g_topExtHigh=abH; g_topCreateTime=barTime; g_topUnstable=false; g_topTouchCount=0;
+        g_botRefLow=abL; g_botRefHigh=bb; g_botExtLow=abL; g_botCreateTime=barTime; g_botUnstable=false; g_botTouchCount=0; g_botInZone=false;
+        g_topRefLow=tb;  g_topRefHigh=abH; g_topExtHigh=abH; g_topCreateTime=barTime; g_topUnstable=false; g_topTouchCount=0; g_topInZone=false;
     }
     else
     {
+        // Bottom zone — count only on entry (false→true transition), not on every in-zone bar.
         if(barLow < g_botExtLow) {
             if((barLow+zs) >= g_botRefLow) g_botExtLow=barLow;
-            else { g_botRefLow=barLow; g_botRefHigh=barLow+zs; g_botExtLow=barLow; g_botCreateTime=barTime; g_botUnstable=false; g_botTouchCount=0; }
-        } else if(barLow <= bb && barTime > g_botCreateTime+onePer) { g_botUnstable=true; g_botTouchCount++; }
+            else { g_botRefLow=barLow; g_botRefHigh=barLow+zs; g_botExtLow=barLow; g_botCreateTime=barTime; g_botUnstable=false; g_botTouchCount=0; g_botInZone=false; }
+            g_botInZone = true;   // price is in/below zone; hold flag to avoid double-count next bar
+        } else if(barLow <= bb && barTime > g_botCreateTime+onePer) {
+            if(!g_botInZone) { g_botUnstable=true; g_botTouchCount++; }
+            g_botInZone = true;
+        } else { g_botInZone = false; }   // price is above zone — reset for next entry
+        // Top zone — same pattern.
         if(barHigh > g_topExtHigh) {
             if((barHigh-zs) <= g_topRefHigh) g_topExtHigh=barHigh;
-            else { g_topRefLow=barHigh-zs; g_topRefHigh=barHigh; g_topExtHigh=barHigh; g_topCreateTime=barTime; g_topUnstable=false; g_topTouchCount=0; }
-        } else if(barHigh >= tb && barTime > g_topCreateTime+onePer) { g_topUnstable=true; g_topTouchCount++; }
+            else { g_topRefLow=barHigh-zs; g_topRefHigh=barHigh; g_topExtHigh=barHigh; g_topCreateTime=barTime; g_topUnstable=false; g_topTouchCount=0; g_topInZone=false; }
+            g_topInZone = true;
+        } else if(barHigh >= tb && barTime > g_topCreateTime+onePer) {
+            if(!g_topInZone) { g_topUnstable=true; g_topTouchCount++; }
+            g_topInZone = true;
+        } else { g_topInZone = false; }
     }
 }
 
@@ -801,7 +814,7 @@ void ManageTrade()
             sellPend = 0; buyPend = 0;
         }
     }
-    // FORCE CLOSE — 20:45 onwards
+    // FORCE CLOSE — 19:45 onwards (same as TRADE_STOP)
     if(IsForceCloseTime())
     {
         if(sellPend > 0 || buyPend > 0)
@@ -923,7 +936,7 @@ void ManageTrade()
             {
                 if(ask >= lastPrice + dist)
                 {
-                    double newLots  = NormalizeDouble(lastLots * 2.0, 2);
+                    double newLots  = NormalizeDouble(lastLots * InpLotMultiplier, 2);
                     double totalVol = GetTotalVolume(POSITION_TYPE_SELL);
                     double curBE    = GetWeightedBreakEven(POSITION_TYPE_SELL);
                     double newBE    = NormalizeDouble((curBE*totalVol + bid*newLots)/(totalVol+newLots), digits);
@@ -962,7 +975,7 @@ void ManageTrade()
             {
                 if(bid <= lastPrice - dist)
                 {
-                    double newLots  = NormalizeDouble(lastLots * 2.0, 2);
+                    double newLots  = NormalizeDouble(lastLots * InpLotMultiplier, 2);
                     double totalVol = GetTotalVolume(POSITION_TYPE_BUY);
                     double curBE    = GetWeightedBreakEven(POSITION_TYPE_BUY);
                     double newBE    = NormalizeDouble((curBE*totalVol + ask*newLots)/(totalVol+newLots), digits);
@@ -1494,7 +1507,7 @@ void UpdateVisuals()
     if(g_activeIdx < 0)
     {
         DeleteAllBoxes();
-        g_activeSince=0; g_botUnstable=g_topUnstable=false; g_botTouchCount=g_topTouchCount=0;
+        g_activeSince=0; g_botUnstable=g_topUnstable=false; g_botTouchCount=g_topTouchCount=0; g_botInZone=g_topInZone=false;
         UpdateDashboard();
         ChartRedraw(0); return;
     }
@@ -1561,6 +1574,7 @@ int OnInit()
     g_activeIdx = -1; g_initialized = false; g_activeSince = 0;
     g_botUnstable = g_topUnstable = false;
     g_botTouchCount = g_topTouchCount = 0;
+    g_botInZone = g_topInZone = false;
     g_state = STATE_IDLE; g_tpFrozen = false; g_noNewCycles = false; g_prevBlockTime = 0;
     g_panX = -1; g_panY = -1; g_panDragged = false;
     g_dragging = false; g_prevLBtn = false;

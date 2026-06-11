@@ -1,7 +1,7 @@
 # AurumBlock
 
 **Platform:** MetaTrader 5  
-**Version:** 1.17  
+**Version:** 1.20  
 **Last updated:** 2026-06-09  
 **Based on:** [FvgBlock](../FvgBlock/) v3.87
 
@@ -95,6 +95,8 @@ Each FVG band is coloured to indicate how many times price has touched it since 
 
 Touch counts are reset when a new block is activated, or when a band expands after a large price move. The `!↑Nt` / `!↓Nt` notation in the dashboard box row shows when a band has reached the warning threshold. Scale-in positions on an already-open trade are never blocked by touch count — only new initial entries are gated.
 
+Each **visit** to the zone counts as one touch, regardless of how many consecutive bars price remains inside it. The EA tracks whether price was already in the zone on the previous bar (`g_botInZone` / `g_topInZone`) and only increments the counter on the entry transition (outside → inside).
+
 ## Configuration
 
 Most settings are `#define` constants — change them and recompile. The runtime inputs are:
@@ -103,6 +105,7 @@ Most settings are `#define` constants — change them and recompile. The runtime
 |---|---|---|
 | `InpFixedLots` | 0.0 | Fixed initial lot (0 = auto by balance formula) |
 | `InpMinOrderDist` | 130.0 | Pips between scale-in levels (was `#define`, now tunable at runtime / in optimizer) |
+| `InpLotMultiplier` | 2.0 | Scale-in lot multiplier (2 = double, 3 = triple, 4 = quadruple) |
 | `InpUIScale` | 1 | Dashboard scale: `1` = Windows / non-Retina Mac; `2` = Mac Retina / HiDPI |
 
 Key constants (edit in source before compiling):
@@ -116,7 +119,7 @@ Key constants (edit in source before compiling):
 | `NEWS_PRE_SEC` | 8100 | Seconds before event to block (135 min) |
 | `NEWS_POST_SEC` | 900 | Seconds after event to resume (15 min) |
 | `TRADE_START_H/M` | 23:15 | Trading window start |
-| `FORCE_CLOSE_H/M` | 20:45 | Force-close time |
+| `FORCE_CLOSE_H/M` | 19:45 | Force-close / scale-in threshold (unified) |
 | `SERVER_OFFSET` | 3 | Broker server UTC offset |
 | `LOCAL_OFFSET` | 1 | Local UTC offset |
 | `TOUCH_WARN_COUNT` | 3 | Touch threshold to flag a band as exhausted and block new entries |
