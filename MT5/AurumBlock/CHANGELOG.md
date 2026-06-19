@@ -1,5 +1,35 @@
 # AurumBlock EA — Changelog
 
+## v1.30 — 2026-06-19
+
+### Feature — Max floating drawdown per cycle (`max_dd`)
+
+Tracks the worst (most negative) sum of floating P&L of all EA-magic positions, sampled
+on every tick while a cycle is active. Stored in `cycles.max_dd` (negative value, e.g. -1.36 USC).
+
+- New global `g_cyclePeakDD`: reset to 0.0 at cycle open and after cycle close.
+- Per-tick loop in ManageTrade() sums `POSITION_PROFIT + POSITION_SWAP` for all EA positions;
+  updates `g_cyclePeakDD` whenever the sum is more negative.
+- `DBLogCycle()` writes `g_cyclePeakDD` into the new `max_dd` column.
+- `DBInit()` adds `ALTER TABLE cycles ADD COLUMN max_dd REAL DEFAULT 0.0` for existing DBs.
+
+---
+
+## v1.29 — 2026-06-19
+
+### Fix — DBLogCycle: index-based deal scan replaces timestamp-based scan
+
+v1.28 changed `HistorySelect(cycleStart - 1, ...)` to `HistorySelect(cycleStart, ...)` but
+the bug persisted: when a cycle closes and the next opens in the same second, the exit
+deal of the previous cycle has `DEAL_TIME == cycleStart`, so it was still captured by the
+inclusive range.
+
+Root fix: at the IDLE→SELLS/BUYS transition, snapshot `HistoryDealsTotal()` into
+`g_cycleStartDealCount`. `DBLogCycle` now uses `HistorySelect(0, now+1)` and loops from
+`g_cycleStartDealCount`, skipping all deals that predate this cycle regardless of timestamp.
+
+---
+
 ## v1.28 — 2026-06-19
 
 ### Fix — DBLogCycle double-counts previous cycle profit

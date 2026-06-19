@@ -8,8 +8,8 @@
 //+------------------------------------------------------------------+
 #property copyright "Jonathas Costa"
 #property link      "https://github.com/jonathascosta/trading-bots"
-#property version   "1.28"
-#define EA_DASH_VER "v1.28"   // shown in dashboard — update together with #property version
+#property version   "1.30"
+#define EA_DASH_VER "v1.30"   // shown in dashboard — update together with #property version
 #include <Trade\Trade.mqh>
 
 //=== External inputs ==================================================
@@ -140,6 +140,8 @@ int      g_sessionId        = -1;
 int      g_currentBlockId   = -1;
 EState   g_prevState        = STATE_IDLE;
 datetime g_cycleOpenTime    = 0;
+int      g_cycleStartDealCount = 0;
+double   g_cyclePeakDD     = 0.0;  // most negative floating P&L seen during current cycle
 ulong    g_openTickets[];
 int      g_openTicketCount  = 0;
 bool     g_prevNews         = false;
@@ -859,13 +861,15 @@ void DBInit()
         "CREATE TABLE IF NOT EXISTS cycles("
         "id INTEGER PRIMARY KEY AUTOINCREMENT,session_id INTEGER,block_id INTEGER,"
         "direction TEXT,open_time INTEGER,close_time INTEGER,duration_sec INTEGER,"
-        "scale_in_count INTEGER,peak_lots REAL,net_pnl REAL,above_be INTEGER);");
+        "scale_in_count INTEGER,peak_lots REAL,net_pnl REAL,above_be INTEGER,max_dd REAL DEFAULT 0.0);");
     DatabaseExecute(g_db,
         "CREATE TABLE IF NOT EXISTS pnl_snapshots("
         "id INTEGER PRIMARY KEY AUTOINCREMENT,session_id INTEGER,"
         "snapshot_time INTEGER NOT NULL,trigger TEXT,"
         "daily_realized REAL,floating_pnl REAL,open_positions INTEGER,"
         "cycles_today INTEGER,cycles_week INTEGER,be_cycles INTEGER,above_be_cycles INTEGER);");
+    // Add max_dd to existing DBs (no-op if column already exists)
+    DatabaseExecute(g_db, "ALTER TABLE cycles ADD COLUMN max_dd REAL DEFAULT 0.0;");
     DatabaseExecute(g_db, "CREATE INDEX IF NOT EXISTS idx_blocks_session  ON blocks(session_id);");
     DatabaseExecute(g_db, "CREATE INDEX IF NOT EXISTS idx_touches_block   ON zone_touches(block_id);");
     DatabaseExecute(g_db, "CREATE INDEX IF NOT EXISTS idx_filters_session ON filter_events(session_id,event_time);");
@@ -1125,12 +1129,12 @@ void DBLogCycle(EState fromState, datetime cycleStart)
     if(!InpLogTrades || g_db == INVALID_HANDLE || IsTesting()) return;
     if(fromState != STATE_SELLS && fromState != STATE_BUYS) return;
     string direction = (fromState == STATE_SELLS) ? "sell" : "buy";
-    if(!HistorySelect(cycleStart, TimeCurrent() + 1)) return;
+    if(!HistorySelect(0, TimeCurrent() + 1)) return;
     int    total    = HistoryDealsTotal();
     double netPnl   = 0, peakLots = 0, lotSum = 0;
     int    scaleIns = 0;
     datetime firstIn = 0, lastOut = 0;
-    for(int i = 0; i < total; i++)
+    for(int i = g_cycleStartDealCount; i < total; i++)
     {
         ulong deal = HistoryDealGetTicket(i);
         if(HistoryDealGetString(deal, DEAL_SYMBOL)  != Symbol())     continue;
@@ -1158,11 +1162,11 @@ void DBLogCycle(EState fromState, datetime cycleStart)
     if(firstIn == 0 || lastOut == 0) return;
     DatabaseExecute(g_db, StringFormat(
         "INSERT INTO cycles(session_id,block_id,direction,open_time,close_time,duration_sec,"
-        "scale_in_count,peak_lots,net_pnl,above_be) "
-        "VALUES(%d,%d,'%s',%d,%d,%d,%d,%.2f,%.2f,%d);",
+        "scale_in_count,peak_lots,net_pnl,above_be,max_dd) "
+        "VALUES(%d,%d,'%s',%d,%d,%d,%d,%.2f,%.2f,%d,%.2f);",
         g_sessionId, g_currentBlockId, direction,
         (long)firstIn, (long)lastOut, (long)lastOut - (long)firstIn,
-        scaleIns, peakLots, netPnl, netPnl > 0.10 ? 1 : 0));
+        scaleIns, peakLots, netPnl, netPnl > 0.10 ? 1 : 0, g_cyclePeakDD));
 }
 
 void DBLogPnLSnapshot(const string trigger)
@@ -1321,6 +1325,11 @@ void ManageTrade()
             datetime _pt = (datetime)PositionGetInteger(POSITION_TIME);
             if(_pt < g_cycleOpenTime) g_cycleOpenTime = _pt;
         }
+        // Snapshot deal count so DBLogCycle scans only this cycle's deals,
+        // even when the previous cycle closed in the same second.
+        HistorySelect(0, TimeCurrent() + 1);
+        g_cycleStartDealCount = HistoryDealsTotal();
+        g_cyclePeakDD = 0.0;
     }
     if((g_prevState == STATE_SELLS || g_prevState == STATE_BUYS) && g_state == STATE_IDLE)
     {
@@ -1328,8 +1337,24 @@ void ManageTrade()
         DBLogPnLSnapshot("cycle_close");
         g_cycleOpenTime  = 0;
         g_tradeBlockTime = 0;
+        g_cyclePeakDD    = 0.0;
     }
     g_prevState = g_state;
+
+    // Track worst floating drawdown each tick while a cycle is active
+    if(g_state == STATE_SELLS || g_state == STATE_BUYS)
+    {
+        double _fp = 0.0;
+        for(int _fi = PositionsTotal()-1; _fi >= 0; _fi--)
+        {
+            ulong _ft = PositionGetTicket(_fi);
+            if(!PositionSelectByTicket(_ft)) continue;
+            if(PositionGetString(POSITION_SYMBOL)  != Symbol())     continue;
+            if(PositionGetInteger(POSITION_MAGIC)  != MAGIC_NUMBER) continue;
+            _fp += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+        }
+        if(_fp < g_cyclePeakDD) g_cyclePeakDD = _fp;
+    }
 
     bool canOpen = IsTradingAllowed() && !IsNewsTime() && !IsSessionPauseTime() && !g_noNewCycles;
 

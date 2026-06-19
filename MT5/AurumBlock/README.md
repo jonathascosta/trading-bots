@@ -1,7 +1,7 @@
 # AurumBlock
 
 **Platform:** MetaTrader 5  
-**Version:** 1.28  
+**Version:** 1.30  
 **Last updated:** 2026-06-09  
 **Based on:** [FvgBlock](../FvgBlock/) v3.87
 
@@ -141,7 +141,7 @@ When running live (`IsTesting()` = false), the EA writes to `MQL5\Files\AurumBlo
 | `zone_touches` | Each distinct zone touch (bot/top) with exhaustion flag |
 | `filter_events` | News / session-pause / trading-window / force-close transitions with duration |
 | `trades` | Every order placed, scale-ins, and position closes with P&L breakdown |
-| `cycles` | Completed trade cycles: direction, duration, scale-in count, peak lots, net P&L |
+| `cycles` | Completed trade cycles: direction, duration, scale-in count, peak lots, net P&L, max floating drawdown (`max_dd`) |
 | `pnl_snapshots` | End-of-day and cycle-close P&L snapshots |
 
 **Retention:** on the first tick of each new month, the active DB is archived to `AurumBlock_YYYY_MM.db`, rows older than 30 days are pruned, and `VACUUM` is run. Backtests do not write to the database.
