@@ -1,7 +1,7 @@
 # AurumBlock
 
 **Platform:** MetaTrader 5  
-**Version:** 1.20  
+**Version:** 1.28  
 **Last updated:** 2026-06-09  
 **Based on:** [FvgBlock](../FvgBlock/) v3.87
 
@@ -75,10 +75,9 @@ Rows top to bottom:
 - **Status row** — current state: `● ACTIVE` (green), `▶ NEWS <name> » Xm` (amber), `⏸ <Session> pause » Xm` (amber), `■ PAUSED` (red)
 - **Next event row** — upcoming pause/news preview: amber when < 90 min to news pre-block or < 60 min to session pause; dim informational when event is within 8 h
 - **Box row** — active FVG block range, pip size, and per-band touch counters (`↑Nt ↓Nt`; prefixed with `!` when a band is exhausted)
-- **Ciclos hoje / semana** — initial cycle entries only (scale-ins excluded)
-- **Tempo mín / avg / máx** — per closed position duration
-- **Breakeven** — cycles with net P&L ≤ $0.10 after costs
-- **Acima BE** — cycles with net P&L > $0.10
+- **Today row** — cycles started today + closed breakdown: `BE N  >BE N` (BE = net P&L ≤ $0.10; >BE = net P&L > $0.10)
+- **Week row** — same breakdown for the current week
+- **Duration row** — min / avg / max per closed position
 - **Version label** — EA version shown in dim text at the bottom-right of the panel
 
 Set `InpUIScale = 2` on Mac Retina / HiDPI displays to prevent the bitmap from rendering at half the logical size.
@@ -107,6 +106,10 @@ Most settings are `#define` constants — change them and recompile. The runtime
 | `InpMinOrderDist` | 130.0 | Pips between scale-in levels (was `#define`, now tunable at runtime / in optimizer) |
 | `InpLotMultiplier` | 2.0 | Scale-in lot multiplier (2 = double, 3 = triple, 4 = quadruple) |
 | `InpUIScale` | 1 | Dashboard scale: `1` = Windows / non-Retina Mac; `2` = Mac Retina / HiDPI |
+| `InpLogTrades` | true | Log every order and position close to SQLite |
+| `InpLogBlocks` | true | Log every new FVG block activation to SQLite |
+| `InpLogFilters` | true | Log news/session/trading-window filter transitions to SQLite |
+| `InpLogSnapshots` | true | Log end-of-day and cycle-close P&L snapshots to SQLite |
 
 Key constants (edit in source before compiling):
 
@@ -124,6 +127,24 @@ Key constants (edit in source before compiling):
 | `LOCAL_OFFSET` | 1 | Local UTC offset |
 | `TOUCH_WARN_COUNT` | 3 | Touch threshold to flag a band as exhausted and block new entries |
 | `C_OVERTOUCHED` | `C'255,153,153'` | Band colour when touch count ≥ `TOUCH_WARN_COUNT` (red) |
+
+## Activity logging (SQLite)
+
+When running live (`IsTesting()` = false), the EA writes to `MQL5\Files\AurumBlock.db` using the built-in MQL5 SQLite API — no DLLs required. Each logging category can be toggled independently via the `InpLog*` inputs.
+
+**7 tables:**
+
+| Table | Contents |
+|---|---|
+| `sessions` | EA start/stop with full config JSON |
+| `blocks` | Every new FVG block activation and zone coordinates |
+| `zone_touches` | Each distinct zone touch (bot/top) with exhaustion flag |
+| `filter_events` | News / session-pause / trading-window / force-close transitions with duration |
+| `trades` | Every order placed, scale-ins, and position closes with P&L breakdown |
+| `cycles` | Completed trade cycles: direction, duration, scale-in count, peak lots, net P&L |
+| `pnl_snapshots` | End-of-day and cycle-close P&L snapshots |
+
+**Retention:** on the first tick of each new month, the active DB is archived to `AurumBlock_YYYY_MM.db`, rows older than 30 days are pruned, and `VACUUM` is run. Backtests do not write to the database.
 
 ## External files required
 

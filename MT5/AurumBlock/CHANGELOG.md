@@ -1,179 +1,307 @@
 # AurumBlock EA — Changelog
 
+## v1.28 — 2026-06-19
+
+### Fix — DBLogCycle double-counts previous cycle profit
+
+`HistorySelect` was called with `cycleStart - 1` to avoid missing the entry deal.
+When a cycle closes and the next one opens in the same second, this caused
+`HistorySelect` to start 1 second before the new cycle, capturing the previous
+cycle's exit deal and inflating `net_pnl` by the previous cycle's profit.
+
+Fix: `HistorySelect(cycleStart, ...)` — safe because `g_cycleOpenTime` is set
+from `POSITION_TIME`, which equals the entry deal's `DEAL_TIME`, so no deal is
+missed by the inclusive range.
+
+---
+
+## v1.27 — 2026-06-12
+
+### Visual — remove border outline from FVG block
+
+Removed the dedicated border rectangle (`AUR_MID_BORD`) that was drawn on top of
+the filled block. The block now renders as solid filled zones with no outline.
+
+Removed: `N_MID_B` object name, `BORDER_WIDTH` define, `cBorder` local variable,
+and the `BoxSet(N_MID_B, ...)` call in `UpdateVisuals()`.
+
+---
+
+## v1.26 — 2026-06-11
+
+### Dashboard — remove arrow glyph from cycle count rows
+
+Removed `↑` prefix from "Today" and "Week" rows (no functional meaning).
+
+---
+
+## v1.25 — 2026-06-11
+
+### Dashboard — separate today / week stats with per-period BE breakdown
+
+**Cycles rows restructured:**
+- Row "Today": total cycles started today + closed breakdown — `BE N  >BE N`
+- Row "Week": same for the current week
+
+The "Today" total counts initial entries (including any cycle still open).
+`BE` = closed cycles where net P&L ≤ $0.10 (breakeven/loss).
+`>BE` = closed cycles where net P&L > $0.10 (profitable).
+
+**Removed:** separate "Breakeven" and "Above BE" rows (merged into the two new rows).
+**Added:** "Duration" row promoted to the freed position.
+
+---
+
+## v1.24 — 2026-06-11
+
+### Fix — TP tracking the visual midline correctly + same-block guard
+
+**Bug:** the midline area drawing moved on every tick (because `UpdateVisuals()` includes
+the live bar's high/low range) but the TP stayed put until bar close. Fixed by applying
+the same live-bar adjustment to `abH`/`abL` in `ManageTrade()`.
+
+**New rule — same-block guard:** `g_tradeBlockTime` records the `startTime` of the block
+that opened the current cycle. TP is only updated when the active block is the same as
+the one that created the position. If the block changes while positions are still open,
+the TP stays frozen at its last value.
+
+**Threshold change:** `UpdateAllTPs` and `UpdatePendingOrder` now use `> 0.01` (was
+`> 0.00001`) before sending a `PositionModify` — prevents redundant broker calls for
+sub-pip drift on XAUUSD.
+
+---
+
+## v1.23 — 2026-06-11
+
+### Feature — SQLite activity logger
+
+Adds persistent logging to `MQL5\Files\AurumBlock.db` (SQLite, built-in MQL5 API, no DLLs).
+Live trading only (`IsTesting()` guard prevents writes during backtesting).
+
+**7 tables:** `sessions`, `blocks`, `zone_touches`, `filter_events`, `trades`, `cycles`, `pnl_snapshots`
+
+**What is logged:**
+- EA start/stop with full config JSON (`sessions`)
+- Every new FVG block activation and its zone coordinates (`blocks`)
+- Each distinct zone touch (bot/top) with exhaustion flag (`zone_touches`)
+- News/session-pause/trading-window/force-close/web-pause transitions with duration (`filter_events`)
+- Every order placed (limit and market), scale-ins, and position closes with P&L breakdown (`trades`)
+- Completed trade cycles: direction, duration, scale-in count, peak lots, net P&L (`cycles`)
+- End-of-day and cycle-close P&L snapshots (`pnl_snapshots`)
+
+**Manual closes** are detected via `DEAL_REASON` and logged as `close_reason='manual'`.
+
+**Retention:** On the first tick of each new month, the active DB is archived to
+`AurumBlock_YYYY_MM.db` via `ATTACH DATABASE`, then rows older than 30 days are pruned
+from the active file and `VACUUM` is run.
+
+**4 new inputs** (group "DB Logging"): `InpLogTrades`, `InpLogBlocks`, `InpLogFilters`,
+`InpLogSnapshots` — each can be toggled independently.
+
+---
+
+## v1.22 — 2026-06-11
+
+### Cleanup — remove redundant `FORCE_CLOSE_H/M` defines
+
+`FORCE_CLOSE_H` and `FORCE_CLOSE_M` were made equal to `TRADE_STOP_H/M` in
+v1.19. `IsForceCloseTime()` now references `TRADE_STOP_H/M` directly.
+The two redundant defines are removed.
+
+No behaviour change.
+
+---
+
+## v1.21 — 2026-06-11
+
+### Change — code and dashboard fully in English
+
+All remaining Portuguese text translated to English:
+- Dashboard labels: "Ciclos" → "Cycles", "hoje" → "today", "semana" → "week",
+  "Duração" → "Duration", "Acima BE" → "Above BE", "ciclos" → "cycles",
+  "em X" → "in X", "para em X" → "stops in X"
+- Code comments: defines, function block headers, inline comments
+- Changelog entries v1.07 – v1.20 translated
+
+No logic changes.
+
+---
+
 ## v1.20 — 2026-06-11
 
-### Fix — contagem de toques por visita, não por barra
+### Fix — touch count per visit, not per bar
 
-**Bug:** `g_botTouchCount++` incrementava em **cada barra M1** onde
-`barLow <= bb`. Se o preço entrasse na zona e ficasse lá 3 minutos seguidos,
-o contador atingia 3 com uma única visita → a zona era invalidada sem ter
-sido tocada 3 vezes de forma independente.
+**Bug:** `g_botTouchCount++` incremented on **every M1 bar** where
+`barLow <= bb`. If price entered the zone and stayed there for 3 consecutive
+bars, the counter reached 3 from a single visit — the zone was invalidated
+before price had independently returned 3 times.
 
-**Causa:** sem memória de se o preço JÁ estava na zona na barra anterior.
+**Root cause:** no memory of whether price was already inside the zone on
+the previous bar.
 
-**Correcção:** dois novos globals `g_botInZone` / `g_topInZone`.
-O contador só incrementa quando o preço **entra** na zona (transição
-fora→dentro). Enquanto o preço permanece na zona, o flag fica `true` e
-o `++` é bloqueado. Ao sair (`barLow > bb`), o flag volta a `false`,
-permitindo contar a próxima visita.
+**Fix:** two new globals `g_botInZone` / `g_topInZone`.
+The counter only increments when price **enters** the zone (false→true
+transition). While price remains in the zone the flag stays `true` and the
+`++` is blocked. On exit (`barLow > bb`) the flag resets to `false`,
+allowing the next visit to be counted.
 
 ```
-Antes: 3 barras seguidas em zona = 3 toques (bug)
-Agora: 3 barras seguidas em zona = 1 toque  (correcto)
+Before: 3 consecutive bars in zone = 3 touches (bug)
+After:  3 consecutive bars in zone = 1 touch  (correct)
 ```
 
-Reset do flag também adicionado em: novo bloco detectado, extensão de banda
-grande (reset de referência), `OnInit()`, e quando `g_activeIdx < 0`.
+Flag reset also added in: new block detected, large band extension (reference
+reset), `OnInit()`, and when `g_activeIdx < 0`.
 
-**Sem impacto na lógica de trading** — apenas a contagem para invalidação.
+**No impact on trading logic** — touch counting only.
 
 ---
 
 ## v1.19 — 2026-06-11
 
-### Change — threshold único de fim de dia (19:45)
+### Change — single end-of-day threshold (19:45)
 
-`FORCE_CLOSE_H` baixou de 20 para 19, igualando `TRADE_STOP_H`.
+`FORCE_CLOSE_H` lowered from 20 to 19, matching `TRADE_STOP_H`.
 
-**Antes:** dois limiares separados:
-- 19:45 → para novos ciclos, cancela pendentes, **bloqueia** scale-ins
-- 20:45 → fecha se positivo; se negativo, activa scale-ins
+**Before:** two separate thresholds:
+- 19:45 → stops new cycles, cancels pending, **blocks** scale-ins
+- 20:45 → close if positive; if negative, activates scale-ins
 
-**Agora:** um único limiar em 19:45:
-- 19:45 → fecha se positivo, cancela pendentes, sem novos ciclos
-- Se negativo com posições abertas → scale-ins permitidos imediatamente
+**Now:** single threshold at 19:45:
+- 19:45 → close if positive, cancel pending, no new cycles
+- If negative with open positions → scale-ins allowed immediately
 
-**Vantagem:** elimina a "zona morta" de 1 hora onde scale-ins estavam
-bloqueados. Entrar num scale-in mais cedo (preço menos adverso) é
-matematicamente melhor do que esperar 60 min.
+**Advantage:** eliminates the 1-hour dead zone where scale-ins were blocked.
+Entering a scale-in earlier (less adverse price) is mathematically better
+than waiting 60 min.
 
-Fechamento manual caso a posição ainda esteja negativa às 22:00+.
+Manual close if position is still negative at 22:00+.
 
-**Sem impacto na lógica de trading** — apenas os defines de tempo.
+**No impact on trading logic** — time defines only.
 
 ---
 
 ## v1.18 — 2026-06-10
 
-### Change — multiplicador de scale-in configurável (`InpLotMultiplier`)
+### Change — configurable scale-in lot multiplier (`InpLotMultiplier`)
 
-O multiplicador de lote estava hardcoded como `2.0` (dobrar) em dois sítios
-em `ManageTrade()`. Passa a ser um input externo:
+The lot multiplier was hardcoded as `2.0` (double) in two places in
+`ManageTrade()`. It is now an external input:
 
 ```
-input double InpLotMultiplier = 2.0;   // 2=dobrar · 3=triplicar · 4=quadruplicar
+input double InpLotMultiplier = 2.0;   // 2=double · 3=triple · 4=quadruple
 ```
 
-Combinações sugeridas (com base na análise de break-even):
+Suggested combinations (based on break-even analysis):
 
-| Multiplicador | Intervalo | BE @ L3 (ex. sell 4100) | Dist. BE (pips) |
+| Multiplier | Interval | BE @ L3 (e.g. sell 4100) | BE distance (pips) |
 |---|---|---|---|
 | 2× | 130 pips | 4118.6 | 74 |
 | 3× | ~90 pips | ~4120 | ~55 |
 | 4× | ~70 pips | ~4122 | ~35 |
 
-Intervalos menores compensam a maior exposição do multiplicador agressivo.
-Optimizar via Strategy Tester com `InpMinOrderDist` e `InpLotMultiplier` em conjunto.
+Smaller intervals compensate for the higher exposure of an aggressive multiplier.
+Optimise via Strategy Tester with `InpMinOrderDist` and `InpLotMultiplier` together.
 
-**Sem impacto em mais nada** — apenas `newLots = lastLots × InpLotMultiplier`.
+**No other impact** — only `newLots = lastLots × InpLotMultiplier`.
 
 ---
 
 ## v1.17 — 2026-06-10
 
-### Fix — drag via CHARTEVENT_MOUSE_MOVE puro
+### Fix — drag via pure CHARTEVENT_MOUSE_MOVE
 
-`CHARTEVENT_OBJECT_CLICK` em `OBJ_BITMAP_LABEL` não dispara de forma fiável
-no MT5. Substituído por detecção de drag inteiramente baseada em
-`CHARTEVENT_MOUSE_MOVE`:
+`CHARTEVENT_OBJECT_DRAG` never fires for `OBJ_BITMAP_LABEL` (it is a
+pixel-positioned overlay, not a price/time chart object). Replaced by drag
+detection entirely based on `CHARTEVENT_MOUSE_MOVE`:
 
-- Novo global `g_prevLBtn` — guarda o estado do botão esquerdo no evento
-  anterior, para detectar a transição `false → true` (botão acabou de ser
-  premido). Isso evita activar um drag acidental quando o utilizador já tinha
-  o botão premido noutro sítio e o cursor passa por cima do painel.
-- Drag começa quando: botão passou de não-premido para premido E cursor está
-  dentro dos limites do painel.
-- Enquanto arrasta: painel actualiza em tempo real, clamped dentro do gráfico.
-- Ao soltar: posição guardada com `GlobalVariableSet`.
+- New global `g_prevLBtn` — stores the left button state from the previous
+  event to detect the `false → true` transition (button just pressed).
+  Prevents accidentally starting a drag when the user had the button pressed
+  elsewhere and moves the cursor over the panel.
+- Drag starts when: button transitioned from released to pressed AND cursor
+  is within the panel bounds.
+- While dragging: panel updates in real time, clamped inside the chart.
+- On release: position saved with `GlobalVariableSet`.
 
-**Sem impacto na lógica de trading** — apenas visual.
+**No impact on trading logic** — visual only.
 
 ---
 
 ## v1.16 — 2026-06-10
 
-### Fix — drag do painel agora funciona
+### Fix — panel drag now works
 
-`CHARTEVENT_OBJECT_DRAG` nunca dispara para `OBJ_BITMAP_LABEL` (é um overlay
-de pixels, não um objecto com coordenadas de preço/tempo).
+`CHARTEVENT_OBJECT_DRAG` never fires for `OBJ_BITMAP_LABEL` (it is a
+pixel-positioned overlay, not a price/time chart object).
 
-**Nova implementação:**
-1. `ChartSetInteger(0, CHART_EVENT_MOUSE_MOVE, true)` em `OnInit` activa eventos
-   de rato no EA
-2. `CHARTEVENT_OBJECT_CLICK` no bitmap detecta o início do drag e guarda o
-   offset (cursor − posição do painel) para não "saltar" ao agarrar
-3. `CHARTEVENT_MOUSE_MOVE` (com botão esquerdo activo) actualiza a posição em
-   tempo real, com clamping nos limites do gráfico
-4. Ao soltar o botão, a posição é persistida com `GlobalVariableSet`
+**New implementation:**
+1. `ChartSetInteger(0, CHART_EVENT_MOUSE_MOVE, true)` in `OnInit` enables
+   mouse events in the EA
+2. `CHARTEVENT_OBJECT_CLICK` on the bitmap detects the drag start and stores
+   the offset (cursor − panel position) to prevent a jump when grabbing
+3. `CHARTEVENT_MOUSE_MOVE` (with left button active) updates the position in
+   real time, clamped within chart bounds
+4. On button release, position is persisted with `GlobalVariableSet`
 
-Com `OBJPROP_SELECTABLE = true` o clique no painel vai ao objecto e não ao
-gráfico — o gráfico NÃO desliza enquanto o painel está a ser arrastado.
+With `OBJPROP_SELECTABLE = true` a click on the panel goes to the object, not
+the chart — the chart does NOT scroll while the panel is being dragged.
 
-**Sem impacto na lógica de trading** — apenas visual.
+**No impact on trading logic** — visual only.
 
 ---
 
 ## v1.15 — 2026-06-10
 
-### Visual — dashboard arrastável
+### Visual — draggable dashboard
 
-O painel pode agora ser arrastado para qualquer posição no gráfico.
+The panel can now be dragged to any position on the chart.
 
-**Como usar:** clicar no painel e arrastar para a posição desejada. A posição
-é guardada automaticamente em variáveis globais do terminal (`AUR_PAN_X` /
-`AUR_PAN_Y`) e restaurada quando o EA reinicia. Para repor ao canto
-inferior-esquerdo: retirar o EA e voltar a colocá-lo (ou apagar as variáveis
-globais em `Tools → Global Variables`).
+**How to use:** click on the panel and drag to the desired position. The
+position is saved automatically in terminal global variables (`AUR_PAN_X` /
+`AUR_PAN_Y`) and restored when the EA restarts. To reset to the bottom-left
+corner: remove the EA and reattach it (or delete the global variables in
+`Tools → Global Variables`).
 
-**Implementação:**
-- Novos globals `g_panX`, `g_panY`, `g_panDragged`
-- Nova função `EnsurePanelPos()` — calcula posição padrão (colado ao fundo)
-  quando `!g_panDragged`; não faz nada após o utilizador arrastar
-- `DashLabel()` convertida de `CORNER_LEFT_LOWER` (coords absolutas do
-  fundo do gráfico) para `CORNER_LEFT_UPPER + ANCHOR_LEFT_LOWER` com coords
-  relativas ao painel (`g_panX + 20`, `g_panY + row_offset`)
-- Bitmap do painel: `OBJPROP_SELECTABLE = true` para permitir drag
-- Novo `OnChartEvent()` — captura `CHARTEVENT_OBJECT_DRAG` no bitmap,
-  actualiza `g_panX/g_panY`, persiste com `GlobalVariableSet`, redesenha labels
-- `OnInit()` restaura posição com `GlobalVariableGet` se disponível
+**Implementation:**
+- New globals `g_panX`, `g_panY`, `g_panDragged`
+- New function `EnsurePanelPos()` — calculates the default position (pinned
+  to the bottom) when `!g_panDragged`; no-op after the user drags
+- `DashLabel()` converted from `CORNER_LEFT_LOWER` (absolute chart-bottom
+  coordinates) to `CORNER_LEFT_UPPER + ANCHOR_LEFT_LOWER` with coordinates
+  relative to the panel (`g_panX + 20`, `g_panY + row_offset`)
+- Panel bitmap: `OBJPROP_SELECTABLE = true` to enable drag
+- New `OnChartEvent()` — captures `CHARTEVENT_OBJECT_DRAG` on the bitmap,
+  updates `g_panX/g_panY`, persists with `GlobalVariableSet`, redraws labels
+- `OnInit()` restores position with `GlobalVariableGet` if available
 
-**Sem impacto na lógica de trading** — apenas visual.
+**No impact on trading logic** — visual only.
 
 ---
 
 ## v1.14 — 2026-06-09
 
-### Fix — label de versão deslocado + painel mais largo
+### Fix — version label offset + wider panel
 
-**Label de versão:** `ANCHOR_RIGHT_LOWER` com `CORNER_LEFT_LOWER` causa
-deslocamento em MQL5 — substituído por `ANCHOR_LEFT_LOWER` (mesmo que todos os
-outros labels), posicionado a 50 px da margem direita do painel.
-Cor alterada de `C'70,85,110'` (escuro, sem contraste) para `C'210,220,235'`
-(cinza muito claro, legível sobre o fundo navy).
-Posição final ajustada manualmente: `vx = (20 + DASH_PAN_W - 50)`, `vy = (DASH_PAN_BOT + DASH_PAN_H - 18)`.
+**Version label:** `ANCHOR_RIGHT_LOWER` with `CORNER_LEFT_LOWER` causes
+offset in MQL5 — replaced by `ANCHOR_LEFT_LOWER` (same as all other labels),
+positioned 50 px from the panel's right edge.
+Colour changed from `C'70,85,110'` (dark, no contrast) to `C'210,220,235'`
+(very light grey, readable on the navy background).
+Final position adjusted manually: `vx = (20 + DASH_PAN_W - 50)`, `vy = (DASH_PAN_BOT + DASH_PAN_H - 18)`.
 
-**Painel mais largo:** `DASH_PAN_W` 325 → 370 px para dar mais espaço ao conteúdo.
+**Wider panel:** `DASH_PAN_W` 325 → 370 px to give more room to content.
 
 ---
 
 ## v1.13 — 2026-06-09
 
-### Visual — versão no dashboard
+### Visual — version shown in dashboard
 
-Adicionado label `v1.13` no **canto superior direito** do painel, em fonte 7 pt e
-cor dim (`C'70,85,110'`). Discreto mas sempre visível.
+Added label `v1.13` in the **top-right corner** of the panel, in 8 pt font
+and dim colour (`C'70,85,110'`). Subtle but always visible.
 
-Para manter consistência a cada versão, actualizar os dois defines juntos:
+To stay consistent across versions, always update both defines together:
 ```mql5
 #property version   "X.XX"
 #define EA_DASH_VER "vX.XX"
@@ -183,90 +311,91 @@ Para manter consistência a cada versão, actualizar os dois defines juntos:
 
 ## v1.12 — 2026-06-09
 
-### Fix — dashboard: "non-string passed" e "Label" fantasma
+### Fix — dashboard: "non-string passed" and phantom "Label"
 
-**"non-string passed"** na linha Box: `StringFormat` em MQL5 tem comportamento
-instável ao misturar `%s` e `%d` no mesmo formato. Substituído por concatenação
-de strings + `IntegerToString()`.
+**"non-string passed"** on the Box line: `StringFormat` in MQL5 behaves
+unstably when mixing `%s` and `%d` in the same format string. Replaced by
+string concatenation + `IntegerToString()`.
 
-**"Label" fantasma** na linha de próximo evento: quando `nextText = ""`, o
-`OBJ_LABEL` mostra o texto padrão do MT5 ("Label") em vez de ficar em branco.
-Corrigido passando `" "` (espaço) quando não há evento a mostrar.
+**Phantom "Label"** on the next-event line: when `nextText = ""`, the
+`OBJ_LABEL` shows the MT5 default text ("Label") instead of remaining blank.
+Fixed by passing `" "` (space) when there is no event to display.
 
 ---
 
 ## v1.11 — 2026-06-09
 
-### Lógica — bloqueio de entradas em banda esgotada + contadores no dashboard
+### Logic — block new entries on exhausted band + counters in dashboard
 
-**Bloqueio de entradas (STATE_IDLE):**  
-Quando uma banda atinge `TOUCH_WARN_COUNT` (3) ou mais toques, o EA deixa de abrir
-novas entradas iniciais nesse lado. O lado oposto (se ainda válido) continua a operar
-normalmente. Scale-ins em posições já abertas não são afectados.
+**Entry blocking (STATE_IDLE):**
+When a band reaches `TOUCH_WARN_COUNT` (3) or more touches, the EA stops
+opening new initial entries on that side. The opposite side (if still valid)
+continues to operate normally. Scale-ins on already-open positions are
+not affected.
 
 ```
 topValid = !g_topUnstable || g_topTouchCount < TOUCH_WARN_COUNT
 botValid = !g_botUnstable || g_botTouchCount < TOUCH_WARN_COUNT
 ```
 
-**Contadores visíveis no dashboard (linha Box):**  
-A linha de informação do bloco passa a mostrar o número de toques por banda:
+**Touch counters visible in dashboard (Box line):**
+The block info line now shows the number of touches per band:
 
 ```
 Box  3321.08 – 3315.56  [ 55.2 p ]  ↑1t ↓2t
-Box  3321.08 – 3315.56  [ 55.2 p ]  ↑1t !↓3t   ← "!" quando esgotada
+Box  3321.08 – 3315.56  [ 55.2 p ]  ↑1t !↓3t   ← "!" when exhausted
 ```
 
-**Comportamento do contador com crescimento do bloco:**
-- Crescimento pequeno (banda move <zs): contador persiste — histórico incremental
-- Crescimento grande (nova referência disparada): contador reseta para 0
+**Counter behaviour with block growth:**
+- Small growth (band moves < zs): counter persists — incremental history
+- Large growth (new reference triggered): counter resets to 0
 
 ---
 
 ## v1.10 — 2026-06-09
 
-### Visual — terceira cor nas margens do bloco (contador de toques)
+### Visual — third colour on block margins (touch counter)
 
-Antes: as margens eram azuis (intocadas) ou âmbar (tocadas ≥ 1×) — apenas dois estados.
+Before: margins were blue (untouched) or amber (touched ≥ 1×) — only two states.
 
-Agora há três estados por margem, com reset automático se a banda se expandir para um
-novo extremo (o bloco "deslocou" a sua referência):
+Now there are three states per margin, with automatic reset if the band
+expands to a new extreme (the block "shifted" its reference):
 
-| Toques na margem | Cor da banda | Significado |
+| Touches on margin | Band colour | Meaning |
 |---|---|---|
-| 0 – 1 | Azul `C'194,209,242'` | Normal — primeira entrada |
-| 2 – N-1 | Âmbar `C'240,214,153'` | Atenção — banda já foi testada |
-| ≥ N (default 3) | Vermelho claro `C'255,153,153'` | Alerta — banda fortemente testada |
+| 0 – 1 | Blue `C'194,209,242'` | Normal — first entry |
+| 2 – N-1 | Amber `C'240,214,153'` | Warning — band already tested |
+| ≥ N (default 3) | Light red `C'255,153,153'` | Alert — band heavily tested |
 
-**Threshold configurável:** `#define TOUCH_WARN_COUNT 3` — alterar para ajustar quantos
-toques disparam a cor vermelha.
+**Configurable threshold:** `#define TOUCH_WARN_COUNT 3` — change to adjust
+how many touches trigger the red colour.
 
-**Novos globals:** `g_botTouchCount` · `g_topTouchCount` (int, reset em novo bloco ou
-expansão de banda).
+**New globals:** `g_botTouchCount` · `g_topTouchCount` (int, reset on new
+block or band expansion).
 
-**Sem impacto na lógica de trading** — apenas visual.
+**No impact on trading logic** — visual only.
 
 ---
 
 ## v1.09 — 2026-06-09
 
-### Fix — `SyncCalendarToFile()` dedup e whitelist
+### Fix — `SyncCalendarToFile()` dedup and whitelist
 
-**Problema:** o MT5 calendar devolve por vezes dois entries para o mesmo evento
-(nomes ligeiramente diferentes ou horas com offset errado), resultando em duplicados
-no CSV que faziam o bot bloquear duas vezes pelo mesmo evento.
+**Problem:** the MT5 calendar sometimes returns two entries for the same event
+(slightly different names or incorrect time offset), resulting in duplicates
+in the CSV that caused the bot to block twice for the same event.
 
-**Dedup melhorado:** em vez de comparar apenas o datetime exacto, passa a comparar
-por **data + nome normalizado (case-insensitive)**:
-- Mesmo evento no mesmo dia → duplicado ignorado
-- Mesmo evento, hora mais tarde → hora corrigida para a mais cedo (resolve entradas
-  com +3 h causadas pelo bug do `SERVER_OFFSET` em versões anteriores)
+**Improved dedup:** instead of comparing only the exact datetime, now compares
+by **date + normalised name (case-insensitive)**:
+- Same event on the same day → duplicate ignored
+- Same event, later time → time corrected to the earlier one (fixes entries
+  3 h ahead caused by the `SERVER_OFFSET` bug in previous versions)
 
-**Whitelist expandida:** adicionados `"existing home sales"` e `"new home sales"`
-para serem incluídos automaticamente na sincronização.
+**Expanded whitelist:** added `"existing home sales"` and `"new home sales"`
+to be included automatically in the sync.
 
-**CSV regenerado:** o ficheiro `fvg_news.csv` foi apagado para forçar uma
-regeneração limpa na próxima execução do EA.
+**CSV regenerated:** the `fvg_news.csv` file was deleted to force a clean
+regeneration on the next EA start.
 
 ---
 
@@ -274,49 +403,50 @@ regeneração limpa na próxima execução do EA.
 
 ### Fix — Dashboard HiDPI/Mac scaling (`InpUIScale`)
 
-No Mac com ecrã Retina (ou qualquer display HiDPI), o `OBJ_BITMAP_LABEL` renderiza
-o bitmap em **pixels físicos** (mapeamento 1:1), enquanto as coordenadas dos labels
-(`CORNER_LEFT_LOWER`, `YDISTANCE`) usam **pixels lógicos** (já escalados pelo sistema).
-Resultado: o fundo aparecia com metade do tamanho visual e as letras "vazavam" para fora.
+On Mac with a Retina screen (or any HiDPI display), `OBJ_BITMAP_LABEL` renders
+the bitmap in **physical pixels** (1:1 mapping), while label coordinates
+(`CORNER_LEFT_LOWER`, `YDISTANCE`) use **logical pixels** (already scaled by
+the OS). Result: the background appeared at half the visual size and the text
+"leaked" outside it.
 
-**Solução:** novo parâmetro de input `InpUIScale` (padrão = 1).
+**Solution:** new input parameter `InpUIScale` (default = 1).
 
-| Valor | Quando usar |
+| Value | When to use |
 |---|---|
-| `1` | Windows / Mac ecrã não-Retina (comportamento anterior) |
-| `2` | Mac com ecrã Retina / HiDPI 1920 × 1080 |
+| `1` | Windows / Mac non-Retina screen (previous behaviour) |
+| `2` | Mac Retina screen / HiDPI 1920 × 1080 |
 
-Com `InpUIScale = 2`:
-- O bitmap é criado com `DASH_PAN_W × 2` por `DASH_PAN_H × 2` pixels físicos  
-  → no ecrã Retina ocupa exactamente `DASH_PAN_W × DASH_PAN_H` pixels lógicos ✓  
-- As coordenadas dos labels (`XDISTANCE`, `YDISTANCE`) são multiplicadas por 2  
-  → permanecem alinhados dentro do bitmap ✓  
-- O posicionamento do painel (`panTop`) usa `DASH_PAN_H × InpUIScale`  
-  → o fundo cola-se correctamente à margem inferior do gráfico ✓
+With `InpUIScale = 2`:
+- Bitmap created at `DASH_PAN_W × 2` by `DASH_PAN_H × 2` physical pixels
+  → on Retina occupies exactly `DASH_PAN_W × DASH_PAN_H` logical pixels ✓
+- Label coordinates (`XDISTANCE`, `YDISTANCE`) multiplied by 2
+  → remain aligned inside the bitmap ✓
+- Panel positioning (`panTop`) uses `DASH_PAN_H × InpUIScale`
+  → background correctly pinned to the chart's bottom margin ✓
 
-**Sem impacto na lógica de trading** — apenas visual.
+**No impact on trading logic** — visual only.
 
 ---
 
 ## v1.07 — 2026-06-09
 
-### Dashboard — linha de previsão de próximo evento
+### Dashboard — next-event preview line
 
-Nova linha no dashboard (entre o estado e a info do bloco) que avisa
-antecipadamente quando o bot vai parar, antes de acontecer.
+New line in the dashboard (between the status and box info rows) that warns
+in advance when the bot is about to stop, before it actually happens.
 
-**Três modos de display (prioridade decrescente):**
+**Three display modes (decreasing priority):**
 
-| Situação | Texto | Cor |
+| Situation | Text | Colour |
 |---|---|---|
-| Session pause começa em < 60 min | `▸ ⏸ NY Forex pause  em 23m` | Âmbar |
-| Pre-block de notícia começa em < 90 min | `▸ NEWS NFP 15:30  para em 45m` | Âmbar |
-| Notícia dentro de 8 horas (informativo) | `◦ NFP 15:30  em 3h05m` | Dim |
-| Sem eventos próximos | *(linha vazia)* | — |
+| Session pause starts in < 60 min | `▸ ⏸ NY Forex pause  in 23m` | Amber |
+| News pre-block starts in < 90 min | `▸ NEWS NFP 15:30  stops in 45m` | Amber |
+| News within 8 hours (informational) | `◦ NFP 15:30  in 3h05m` | Dim |
+| No upcoming events | *(empty line)* | — |
 
-**Novas funções:** `GetNextSessionPauseStart()` · `GetNextNewsInfo()`
+**New functions:** `GetNextSessionPauseStart()` · `GetNextNewsInfo()`
 
-**Ajustes de layout:** `DASH_PAN_H` 155 → 179 px · `N_DASH0` y=145 → y=169 · `N_DASHN` novo em y=145
+**Layout adjustments:** `DASH_PAN_H` 155 → 179 px · `N_DASH0` y=145 → y=169 · `N_DASHN` new at y=145
 
 ---
 
@@ -423,7 +553,7 @@ Based on FvgBlock v3.87. No external inputs — all settings are `#define` const
 - **Dark navy card** (`C'22,27,40'`) with cobalt border — readable on any chart
   background (white or dark); previous alpha-blended background was illegible on
   light charts.
-- **Data fix — cycle counter**: `Ciclos` now counts only *initial* cycle entries
+- **Data fix — cycle counter**: `Cycles` now counts only *initial* cycle entries
   (comments `AUR_SL`, `AUR_SM`, `AUR_BL`, `AUR_BM`). Scale-in entries
   (`AUR_SS`, `AUR_BS`) are excluded. Previously every individual entry was counted,
   inflating the number by the average martingale depth.
@@ -517,10 +647,10 @@ Scale-in lots continue to double the last position's lot regardless.
 
 ### Dashboard overlay
 `OBJ_RECTANGLE_LABEL` panel, bottom-left corner, showing:
-- Ciclos hoje / semana
-- Tempo mín / avg / máx (per closed position)
+- Cycles today / week
+- Duration min / avg / max (per closed position)
 - Breakeven cycles (net ≤ $0.10 after cost)
-- Acima BE cycles (net > $0.10)
+- Above BE cycles (net > $0.10)
 
 ### Status label enhancements
 Top-left label shows active state prefix:
