@@ -1,7 +1,7 @@
 # AurumBlock
 
 **Platform:** MetaTrader 5  
-**Version:** 1.30  
+**Version:** 1.37  
 **Last updated:** 2026-06-09  
 **Based on:** [FvgBlock](../FvgBlock/) v3.87
 
@@ -52,19 +52,18 @@ Both high-impact (red) and moderate-impact (orange) events on the whitelist are 
 ## Lot sizing
 
 ```
-lot = 0.01 × MAX(1;  1 + FLOOR( (√(2×Balance − 700) − 30) / 20 ))
+lot = FLOOR( Balance / (13 × 100 × (2^(InpMaxFolds+2) − InpMaxFolds − 3)), 0.01 )
 ```
 
-Square-root curve — grows more slowly than the previous linear formula, keeping 0.01 lot for longer on smaller accounts:
+Denominator equals the worst-case total floating exposure (in account-currency units per 0.01 lot) up to the point where an additional scale-in beyond `InpMaxFolds` would trigger — providing one full safety interval of buffer. Result is floored to the 0.01 grid; minimum is 0.01.
 
-| Balance range | Auto lot |
-|---|---|
-| < $1 600 | 0.01 |
-| $1 600 – $2 799 | 0.02 |
-| $2 800 – $4 399 | 0.03 |
-| $4 400 – $6 399 | 0.04 |
+| Balance (USC) | InpMaxFolds=6 | InpMaxFolds=10 |
+|---|---|---|
+| 10 000 | 0.02 | 0.01 |
+| 70 000 | 0.11 | 0.02 |
+| 140 000 | 0.22 | 0.05 |
 
-Set `InpFixedLots > 0` to override with a fixed lot without recompiling. Scale-in lots always double the previous position's lot regardless of this setting.
+Set `InpFixedLots > 0` to override with a fixed lot without recompiling. Scale-in lots multiply the previous position's lot by `InpLotMultiplier` regardless of this setting.
 
 ## Dashboard (bottom-left)
 
@@ -96,6 +95,17 @@ Touch counts are reset when a new block is activated, or when a band expands aft
 
 Each **visit** to the zone counts as one touch, regardless of how many consecutive bars price remains inside it. The EA tracks whether price was already in the zone on the previous bar (`g_botInZone` / `g_topInZone`) and only increments the counter on the entry transition (outside → inside).
 
+## Safe Mode
+
+When `InpSafeMode = true`, new cycle entries are restricted to two UTC+1 time windows:
+
+| Window | Hours |
+|---|---|
+| Window 1 | 01:15 – 05:45 |
+| Window 2 | 08:15 – 10:45 |
+
+Outside these windows, pending limit orders are cancelled and no new initial entries are placed. Scale-ins on existing open positions continue normally. Session pauses are overridden by Safe Mode for scale-ins (news blocks still apply in all cases). The dashboard shows `◈ SAFE  scale-ins only` (indigo) when outside a window and `● ACTIVE  (safe window)` when inside one.
+
 ## Configuration
 
 Most settings are `#define` constants — change them and recompile. The runtime inputs are:
@@ -105,6 +115,8 @@ Most settings are `#define` constants — change them and recompile. The runtime
 | `InpFixedLots` | 0.0 | Fixed initial lot (0 = auto by balance formula) |
 | `InpMinOrderDist` | 130.0 | Pips between scale-in levels (was `#define`, now tunable at runtime / in optimizer) |
 | `InpLotMultiplier` | 2.0 | Scale-in lot multiplier (2 = double, 3 = triple, 4 = quadruple) |
+| `InpMaxFolds` | 10 | Number of scale-ins the auto-lot formula is sized to support |
+| `InpSafeMode` | false | Restrict new cycle entries to two UTC+1 windows (01:15–05:45 and 08:15–10:45) |
 | `InpUIScale` | 1 | Dashboard scale: `1` = Windows / non-Retina Mac; `2` = Mac Retina / HiDPI |
 | `InpLogTrades` | true | Log every order and position close to SQLite |
 | `InpLogBlocks` | true | Log every new FVG block activation to SQLite |

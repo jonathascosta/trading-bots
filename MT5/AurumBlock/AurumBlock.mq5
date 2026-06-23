@@ -8,15 +8,19 @@
 //+------------------------------------------------------------------+
 #property copyright "Jonathas Costa"
 #property link      "https://github.com/jonathascosta/trading-bots"
-#property version   "1.30"
-#define EA_DASH_VER "v1.30"   // shown in dashboard — update together with #property version
+#property version   "1.37"
+#define EA_DASH_VER "v1.37"   // shown in dashboard — update together with #property version
 #include <Trade\Trade.mqh>
 
 //=== External inputs ==================================================
 input double InpFixedLots    = 0.0;    // Fixed lot size (0 = auto by balance)
+input int    InpMaxFolds     = 10;     // Scale-ins to support in auto lot sizing
 input double InpMinOrderDist = 130.0;  // Distance between scale-ins (pips)
 input double InpLotMultiplier = 2.0;   // Scale-in lot multiplier (2=double, 3=triple…)
 input int    InpUIScale      = 1;      // Dashboard scale: 1=normal, 2=Mac HiDPI/Retina
+
+input group  "=== Safe Mode ==="
+input bool   InpSafeMode     = false;  // restrict new entries to safe time windows
 
 input group  "=== DB Logging ==="
 input bool   InpLogTrades    = true;   // log order/position lifecycle
@@ -31,7 +35,7 @@ input bool   InpLogSnapshots = true;   // log periodic P&L snapshots
 #define PIP_VALUE           0.10
 #define BARS_FUTURE         50
 // Initial lot: controlled by InpFixedLots input (see GetLots() below).
-#define COST_PER_LOT        0.06        // Round-trip cost per 0.01 lot ($)
+#define COST_PER_LOT        0.12        // Round-trip cost per 0.01 lot ($)
 #define MAGIC_NUMBER        20250528
 
 //=== Time filter (local UTC+1 summer) ===============================
@@ -60,6 +64,17 @@ input bool   InpLogSnapshots = true;   // log periodic P&L snapshots
 #define NEXT_SESSION_WARN_MIN  60       // show session-pause warning up to X min before it starts
 #define NEXT_NEWS_WARN_MIN     90       // amber warning when news pre-block starts in < X min
 #define NEXT_NEWS_SHOW_H       8        // show next news event if it occurs within X hours
+
+//=== Safe Mode windows (local UTC+1) — new entries only inside these ranges =====
+// Window 1: 01:15 – 05:45  |  Window 2: 08:15 – 10:45
+#define SAFE_WIN1_START_H   1
+#define SAFE_WIN1_START_M   15
+#define SAFE_WIN1_STOP_H    5
+#define SAFE_WIN1_STOP_M    45
+#define SAFE_WIN2_START_H   8
+#define SAFE_WIN2_START_M   15
+#define SAFE_WIN2_STOP_H    10
+#define SAFE_WIN2_STOP_M    45
 
 //=== Web-panel pause flag (shared with the Flask control panel) =====
 #define PAUSE_FILE          "fvg_pause.flag"
@@ -141,6 +156,7 @@ int      g_currentBlockId   = -1;
 EState   g_prevState        = STATE_IDLE;
 datetime g_cycleOpenTime    = 0;
 int      g_cycleStartDealCount = 0;
+string   g_pendingDirection = "";   // "sell"/"buy" set when initial limit is placed; enables quick-cycle logging
 double   g_cyclePeakDD     = 0.0;  // most negative floating P&L seen during current cycle
 ulong    g_openTickets[];
 int      g_openTicketCount  = 0;
@@ -478,6 +494,25 @@ bool IsPaused()
     return FileIsExist(PAUSE_FILE, FILE_COMMON);
 }
 
+// True when new cycle entries are allowed under Safe Mode rules.
+// Always returns true when InpSafeMode=false.
+// When enabled, new entries are only permitted during:
+//   Window 1: 01:15 – 05:45 UTC+1
+//   Window 2: 08:15 – 10:45 UTC+1
+// Scale-ins on existing positions are never blocked by this function.
+bool IsSafeTime()
+{
+    if(!InpSafeMode) return true;
+    MqlDateTime dt;
+    TimeToStruct(LocalNow(), dt);
+    int cur = dt.hour * 60 + dt.min;
+    int w1s = SAFE_WIN1_START_H * 60 + SAFE_WIN1_START_M;
+    int w1e = SAFE_WIN1_STOP_H  * 60 + SAFE_WIN1_STOP_M;
+    int w2s = SAFE_WIN2_START_H * 60 + SAFE_WIN2_START_M;
+    int w2e = SAFE_WIN2_STOP_H  * 60 + SAFE_WIN2_STOP_M;
+    return (cur >= w1s && cur < w1e) || (cur >= w2s && cur < w2e);
+}
+
 //+------------------------------------------------------------------+
 void CloseAllPositions()
 {
@@ -777,18 +812,17 @@ double GetDailyProfit()
 
 // Returns the initial lot size for a new cycle entry.
 // If InpFixedLots > 0: uses that value (override).
-// Otherwise: 0.01 * MAX(1; 1 + FLOOR((SQRT(2*Balance - 700) - 30) / 20; 1))
-//   $400 – 1599  → 0.01  |  $1600 – 2799 → 0.02
-//   $2800 – 4399 → 0.03  |  $4400 – 6399 → 0.04  …
+// Otherwise: FLOOR(Balance / (13 * 100 * (2^(InpMaxFolds+2) - InpMaxFolds - 3)), 0.01)
+// The denominator covers the floating drawdown up to the point where the
+// (InpMaxFolds+1)th scale-in WOULD trigger — one extra interval of safety
+// beyond the last permitted scale-in, without opening that position.
 double GetLots()
 {
     if(InpFixedLots > 0.0) return InpFixedLots;
-    double bal = AccountInfoDouble(ACCOUNT_BALANCE);
-    double arg = 2.0 * bal - 700.0;
-    if(arg <= 0.0) return 0.01;          // balance < $350 → minimum lot
-    double step = MathFloor((MathSqrt(arg) - 30.0) / 20.0);
-    double lots = 0.01 * MathMax(1.0, 1.0 + step);
-    return NormalizeDouble(lots, 2);
+    double bal   = AccountInfoDouble(ACCOUNT_BALANCE);
+    double denom = 13.0 * 100.0 * (MathPow(2.0, InpMaxFolds + 2) - InpMaxFolds - 3.0);
+    double lots  = MathFloor(bal / denom / 0.01) * 0.01;
+    return NormalizeDouble(MathMax(lots, 0.01), 2);
 }
 
 //+------------------------------------------------------------------+
@@ -1124,11 +1158,10 @@ void DBDetectClosedTrades()
     }
 }
 
-void DBLogCycle(EState fromState, datetime cycleStart)
+void DBLogCycle(string direction)
 {
     if(!InpLogTrades || g_db == INVALID_HANDLE || IsTesting()) return;
-    if(fromState != STATE_SELLS && fromState != STATE_BUYS) return;
-    string direction = (fromState == STATE_SELLS) ? "sell" : "buy";
+    if(direction != "sell" && direction != "buy") return;
     if(!HistorySelect(0, TimeCurrent() + 1)) return;
     int    total    = HistoryDealsTotal();
     double netPnl   = 0, peakLots = 0, lotSum = 0;
@@ -1238,8 +1271,8 @@ void ManageTrade()
         else g_tpFrozen = true;
         g_newFvgThisBar = false;
     }
-    // Cancel pending limits when trading is closed, in news window, or session pause
-    if(!IsTradingAllowed() || IsNewsTime() || IsSessionPauseTime())
+    // Cancel pending limits when trading is closed, in news/session pause, or outside safe window
+    if(!IsTradingAllowed() || IsNewsTime() || IsSessionPauseTime() || (InpSafeMode && !IsSafeTime()))
     {
         if(sellPend > 0 || buyPend > 0)
         {
@@ -1314,6 +1347,7 @@ void ManageTrade()
     if(g_prevState != STATE_SELLS && g_prevState != STATE_BUYS &&
        (g_state == STATE_SELLS || g_state == STATE_BUYS))
     {
+        g_pendingDirection = "";   // normal open — direction comes from g_state
         g_cycleOpenTime   = TimeCurrent();
         g_tradeBlockTime  = g_blocks[g_activeIdx].startTime;
         for(int _i = PositionsTotal()-1; _i >= 0; _i--)
@@ -1325,20 +1359,41 @@ void ManageTrade()
             datetime _pt = (datetime)PositionGetInteger(POSITION_TIME);
             if(_pt < g_cycleOpenTime) g_cycleOpenTime = _pt;
         }
-        // Snapshot deal count so DBLogCycle scans only this cycle's deals,
-        // even when the previous cycle closed in the same second.
+        // Anchor the deal scan so DBLogCycle covers exactly this cycle.
+        // On a fresh start the initial fill is the last deal; on restart
+        // (cycle was already open) entry deals predate this session — walk
+        // back through history to include them all.
         HistorySelect(0, TimeCurrent() + 1);
-        g_cycleStartDealCount = HistoryDealsTotal();
+        int _all = HistoryDealsTotal();
+        g_cycleStartDealCount = _all;
+        for(int _j = _all - 1; _j >= 0; _j--)
+        {
+            ulong _d = HistoryDealGetTicket(_j);
+            if(HistoryDealGetString(_d, DEAL_SYMBOL)                   != Symbol())        continue;
+            if((long)HistoryDealGetInteger(_d, DEAL_MAGIC)             != MAGIC_NUMBER)    continue;
+            if((ENUM_DEAL_ENTRY)HistoryDealGetInteger(_d, DEAL_ENTRY)  != DEAL_ENTRY_IN)   continue;
+            if((datetime)HistoryDealGetInteger(_d, DEAL_TIME)          <  g_cycleOpenTime) break;
+            g_cycleStartDealCount = _j;
+        }
         g_cyclePeakDD = 0.0;
     }
     if((g_prevState == STATE_SELLS || g_prevState == STATE_BUYS) && g_state == STATE_IDLE)
     {
-        DBLogCycle(g_prevState, g_cycleOpenTime);
+        DBLogCycle(g_prevState == STATE_SELLS ? "sell" : "buy");
         DBLogPnLSnapshot("cycle_close");
         g_cycleOpenTime  = 0;
         g_tradeBlockTime = 0;
         g_cyclePeakDD    = 0.0;
     }
+    else if(g_prevState == STATE_PENDING && g_state == STATE_IDLE && g_pendingDirection != "")
+    {
+        // Limit order filled and hit TP within the same server tick — EA never saw STATE_SELLS/BUYS.
+        // g_cycleStartDealCount was anchored when the limit was placed, so DBLogCycle finds the deals.
+        DBLogCycle(g_pendingDirection);
+        DBLogPnLSnapshot("cycle_close");
+        g_cyclePeakDD = 0.0;
+    }
+    if(g_state == STATE_IDLE) g_pendingDirection = "";
     g_prevState = g_state;
 
     // Track worst floating drawdown each tick while a cycle is active
@@ -1356,7 +1411,7 @@ void ManageTrade()
         if(_fp < g_cyclePeakDD) g_cyclePeakDD = _fp;
     }
 
-    bool canOpen = IsTradingAllowed() && !IsNewsTime() && !IsSessionPauseTime() && !g_noNewCycles;
+    bool canOpen = IsTradingAllowed() && !IsNewsTime() && !IsSessionPauseTime() && !g_noNewCycles && IsSafeTime();
 
     // A band is "exhausted" once it has been touched ≥ TOUCH_WARN_COUNT times.
     // No new initial entries are opened on an exhausted side; the opposite side
@@ -1375,6 +1430,7 @@ void ManageTrade()
                 if(!_sl) g_trade.Sell(_lT, NULL, 0.0, 0.0, midTop, "AUR_SM");
                 ulong _tk = g_trade.ResultOrder();
                 if(_tk > 0) DBLogTrade(_sl ? "sell_limit" : "sell_market", _tk, _lT, _sl ? topBand : g_trade.ResultPrice(), midTop);
+                if(_sl) { HistorySelect(0, TimeCurrent()+1); g_cycleStartDealCount = HistoryDealsTotal(); g_pendingDirection = "sell"; }
             }
             if(botValid && buyPend == 0 && CountPositions(POSITION_TYPE_BUY) == 0)
             {
@@ -1383,6 +1439,7 @@ void ManageTrade()
                 if(!_bl) g_trade.Buy(_lB, NULL, 0.0, 0.0, midBot, "AUR_BM");
                 ulong _tk = g_trade.ResultOrder();
                 if(_tk > 0) DBLogTrade(_bl ? "buy_limit" : "buy_market", _tk, _lB, _bl ? botBand : g_trade.ResultPrice(), midBot);
+                if(_bl) { HistorySelect(0, TimeCurrent()+1); g_cycleStartDealCount = HistoryDealsTotal(); g_pendingDirection = "buy"; }
             }
         }
     }
@@ -1417,7 +1474,7 @@ void ManageTrade()
                     UpdatePendingOrder(ORDER_TYPE_SELL_LIMIT, topBand, midTop);
             }
         }
-        if((IsTradingAllowed() || g_noNewCycles) && !IsNewsTime() && !IsSessionPauseTime())
+        if((IsTradingAllowed() || g_noNewCycles) && !IsNewsTime() && (!IsSessionPauseTime() || InpSafeMode))
         {
             double lastPrice=0, lastLots=0; datetime lastTime=0;
             if(GetLastPosition(POSITION_TYPE_SELL, lastPrice, lastLots, lastTime))
@@ -1431,9 +1488,11 @@ void ManageTrade()
                     double newBECost = NormalizeDouble(newBE - COST_PER_LOT, digits);
                     if(g_trade.Sell(newLots, NULL, 0.0, 0.0, newBECost, "AUR_SS"))
                     {
+                        ulong  _ssTk = g_trade.ResultOrder();   // capture before UpdateAllTPs overwrites CTrade result
+                        double _ssPr = g_trade.ResultPrice();
                         UpdateAllTPs(POSITION_TYPE_SELL, newBECost);
                         g_tpFrozen = false;
-                        DBLogTrade("scale_sell", g_trade.ResultOrder(), newLots, g_trade.ResultPrice(), newBECost);
+                        DBLogTrade("scale_sell", _ssTk, newLots, _ssPr, newBECost);
                     }
                 }
             }
@@ -1457,7 +1516,7 @@ void ManageTrade()
                     UpdatePendingOrder(ORDER_TYPE_BUY_LIMIT, botBand, midBot);
             }
         }
-        if((IsTradingAllowed() || g_noNewCycles) && !IsNewsTime() && !IsSessionPauseTime())
+        if((IsTradingAllowed() || g_noNewCycles) && !IsNewsTime() && (!IsSessionPauseTime() || InpSafeMode))
         {
             double lastPrice=0, lastLots=0; datetime lastTime=0;
             if(GetLastPosition(POSITION_TYPE_BUY, lastPrice, lastLots, lastTime))
@@ -1471,9 +1530,11 @@ void ManageTrade()
                     double newBECost = NormalizeDouble(newBE + COST_PER_LOT, digits);
                     if(g_trade.Buy(newLots, NULL, 0.0, 0.0, newBECost, "AUR_BS"))
                     {
+                        ulong  _bsTk = g_trade.ResultOrder();   // capture before UpdateAllTPs overwrites CTrade result
+                        double _bsPr = g_trade.ResultPrice();
                         UpdateAllTPs(POSITION_TYPE_BUY, newBECost);
                         g_tpFrozen = false;
-                        DBLogTrade("scale_buy", g_trade.ResultOrder(), newLots, g_trade.ResultPrice(), newBECost);
+                        DBLogTrade("scale_buy", _bsTk, newLots, _bsPr, newBECost);
                     }
                 }
             }
@@ -1736,9 +1797,14 @@ void UpdateDashboard()
         statText  = "\x23F8  " + sessName + " pause   \xBB " + FormatTimer(sessSecs);
         statColor = C'251,191,36';                    // amber
     }
+    else if(InpSafeMode && !IsSafeTime())
+    {
+        statText  = "\x25C8  SAFE  scale-ins only";   // ◈
+        statColor = C'148,163,255';                   // indigo-blue
+    }
     else
     {
-        statText  = "\x25CF  ACTIVE";
+        statText  = InpSafeMode ? "\x25CF  ACTIVE  (safe window)" : "\x25CF  ACTIVE";
         statColor = C'74,222,128';                    // green
     }
 

@@ -1,5 +1,158 @@
 # AurumBlock EA — Changelog
 
+## v1.37 — 2026-06-22
+
+### Fix — Quick cycles (limit fills + TP in same tick) now logged in DB
+
+**Root cause:** When a sell/buy limit order fills AND hits TP between two `OnTick` calls
+(within the same server tick), the EA state machine jumps `STATE_PENDING → STATE_IDLE`
+without passing through `STATE_SELLS/BUYS`. `DBLogCycle` was only triggered on
+`STATE_SELLS/BUYS → STATE_IDLE`, so these fast cycles were silently dropped from the DB.
+They appeared in MT5 history and in the `trades` table, but never in the `cycles` table,
+making the dashboard Net P&L significantly understated.
+
+**Fix:**
+- When a sell/buy *limit* order is placed in `STATE_IDLE`, immediately anchor
+  `g_cycleStartDealCount = HistoryDealsTotal()` (before the fill) and set
+  `g_pendingDirection = "sell"/"buy"`.
+- A new `else if(g_prevState == STATE_PENDING && g_state == STATE_IDLE && g_pendingDirection != "")`
+  branch calls `DBLogCycle(g_pendingDirection)` on the quick-cycle transition.
+- `DBLogCycle` signature changed from `(EState fromState, datetime cycleStart)` to
+  `(string direction)` — the `cycleStart` parameter was unused internally (INSERT uses
+  `firstIn` from the deal scan).
+- `g_pendingDirection` is cleared on every `STATE_IDLE` entry and when a normal cycle
+  opens (to prevent stale values).
+
+Market orders are unaffected (they go directly to `STATE_SELLS/BUYS`, handled by the
+existing backward-walk anchor path).
+
+---
+
+## v1.36 — 2026-06-22
+
+### Change — Auto-lot formula: extra safety interval beyond last scale-in
+
+**Before:** `denom = 13 × 100 × (2^(N+1) − 2 − N)`
+Sized to survive the floating when the Nth (last) scale-in is placed.
+
+**After:** `denom = 13 × 100 × (2^(N+2) − N − 3)`
+Sized to survive the floating up to the point where the (N+1)th scale-in WOULD trigger,
+without actually opening that position. This adds one full interval of buffer (130 pips
+× total open lots) beyond the last permitted scale-in.
+
+Effect: lot size is approximately halved for the same `InpMaxFolds` value.
+Example with N=6, balance $72 565: 0.46 → 0.22 initial lots.
+
+---
+
+## v1.35 — 2026-06-22
+
+### Fix — Cycle not logged after MT5/chart restart mid-cycle
+
+**Root cause:** On restart with an active cycle, `g_cycleStartDealCount` was set to
+`HistoryDealsTotal()` at restart time — i.e., AFTER all existing entry deals. When the
+cycle eventually closed, `DBLogCycle` scanned from that index, found no `DEAL_ENTRY_IN`
+records, hit the `firstIn == 0` guard, and returned without writing the cycle row.
+
+**Fix:** When the cycle-open transition fires, walk back through history (by magic number
+and symbol) from the current tail to `g_cycleOpenTime`. The first entry deal found
+becomes the new `g_cycleStartDealCount`, ensuring all entry deals — including those that
+predate the current session — are included in the scan.
+
+This fix is purely derived from server-side history, so it survives hard crashes and
+full MT5 restarts with no GlobalVariables or extra DB tables required.
+
+**Side-effect (improvement):** For fresh cycles, `open_time` now reflects the initial
+fill rather than the first scale-in, and `peak_lots` now includes the initial entry lots.
+
+---
+
+## v1.34 — 2026-06-22
+
+### Change — Safe Mode overrides session pause for scale-ins
+
+When `InpSafeMode = true`, session pauses (Tokyo, London, NY, NYSE) no longer block
+scale-ins on existing positions. The Safe Mode operating schedule becomes the single
+governing time rule:
+
+- **Inside safe window:** new entries allowed, scale-ins allowed — session pause ignored.
+- **Outside safe window:** new entries blocked, scale-ins allowed — session pause ignored.
+- **News active:** scale-ins blocked in all cases regardless of Safe Mode (risk control).
+
+Implementation: scale-in guard changed from `!IsSessionPauseTime()` to
+`(!IsSessionPauseTime() || InpSafeMode)` in both `STATE_SELLS` and `STATE_BUYS`.
+
+---
+
+## v1.33 — 2026-06-22
+
+### Fix — Scale-in trades not logged in DB (`scale_sell` / `scale_buy`)
+
+**Root cause:** In both `STATE_SELLS` and `STATE_BUYS`, after `g_trade.Sell()` / `g_trade.Buy()`
+succeeds, `UpdateAllTPs()` was called before reading `g_trade.ResultOrder()` and
+`g_trade.ResultPrice()`. `UpdateAllTPs()` calls `g_trade.PositionModify()` for every open
+position, which overwrites the CTrade internal result buffer. By the time `DBLogTrade` was
+called, `g_trade.ResultOrder()` reflected the last `PositionModify` result (typically 0 or a
+position ticket unrelated to the new scale-in order), causing `DBLogTrade` to return early on
+the `ticket == 0` guard — silently skipping the insert.
+
+**Fix:** Capture `g_trade.ResultOrder()` and `g_trade.ResultPrice()` into local variables
+immediately after `Sell()`/`Buy()` returns, before any other `g_trade` call.
+
+**Note:** Scale-in rows in `trades` will have `closed_at = NULL` and `profit = NULL` because
+`DBDetectClosedTrades()` matches by `DEAL_POSITION_ID`, and on netting accounts all scale-ins
+share the same position ID as the initial entry — the close deal is attributed to the initial
+trade row only. This is acceptable: aggregate P&L is already captured in `cycles.net_pnl`.
+
+---
+
+## v1.32 — 2026-06-21
+
+### Change — Auto lot formula rewritten
+
+New formula: `FLOOR(Balance / (13 × 100 × (2^(Folds+1) − 2 − Folds)), 0.01)`
+
+- `Balance` = account balance (not equity).
+- `Folds` = new input `InpMaxFolds` (int, default 10) — number of scale-ins to support.
+- Denominator = worst-case total exposure in account-currency units per 0.01 lot across all folds.
+- Result is floored to the 0.01 lot grid; minimum enforced at 0.01.
+- Old formula (square-root of balance) removed.
+
+| Balance (USC) | InpMaxFolds=10 → lots |
+|---|---|
+| 10 000 | 0.01 |
+| 38 500 | 0.01 |
+| 70 000 | 0.02 |
+| 140 000 | 0.05 |
+
+---
+
+## v1.31 — 2026-06-21
+
+### Feature — Safe Mode (`InpSafeMode`)
+
+New boolean input (default `false`). When enabled, the EA restricts opening of new cycles
+to two predefined UTC+1 time windows:
+
+- **Window 1:** 01:15 – 05:45
+- **Window 2:** 08:15 – 10:45
+
+**Outside these windows:** pending limit orders are cancelled and no new initial entries are
+placed. Scale-ins (martingale doublings on existing positions) continue normally — the
+`canOpen` guard only controls new cycle entry; scale-in guards (`STATE_SELLS` / `STATE_BUYS`)
+are unaffected.
+
+**Implementation:**
+- `#define` constants `SAFE_WIN1_*` / `SAFE_WIN2_*` for the window boundaries.
+- `IsSafeTime()` — returns `true` always when `InpSafeMode=false`; otherwise checks current
+  local time against the two windows.
+- `canOpen` now includes `IsSafeTime()`.
+- Pending-cancel condition expanded to include `InpSafeMode && !IsSafeTime()`.
+- Dashboard: new status `◈ SAFE  scale-ins only` (indigo) when safe mode is on and outside
+  a window; `● ACTIVE  (safe window)` when inside one.
+
+---
+
 ## v1.30 — 2026-06-19
 
 ### Feature — Max floating drawdown per cycle (`max_dd`)
