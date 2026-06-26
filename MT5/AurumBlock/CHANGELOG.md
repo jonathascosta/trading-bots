@@ -1,5 +1,46 @@
 # AurumBlock EA — Changelog
 
+## v1.39 — 2026-06-23
+
+### Change — Auto-lot: removed InpMaxFolds; tiered threshold is now uncapped
+
+`InpMaxFolds` removed as an input parameter. `GetLots()` now iterates n freely
+from 6 upward — no ceiling needed because the formula is self-limiting: the
+denominator grows as `2^n` while the threshold grows as `2^(n-6)`, so lots
+converges below the threshold at some finite n for any realistic balance.
+
+The loop runs to n=30 as a safety guard (unreachable below ~$10¹² balance).
+
+---
+
+## v1.38 — 2026-06-23
+
+### Change — Auto-lot: tiered threshold allows lot size to grow with balance
+
+**Before:** `GetLots()` used fixed `InpMaxFolds` as the single denominator exponent.
+The lot was always capped below 1.0 — once balance was large enough that the
+calculated lot hit 1.0, the EA silently capped it and would never trade larger.
+
+**After:** `GetLots()` iterates `n` from 6 to `InpMaxFolds`, stopping at the first `n` where:
+`lots < 2^(n−6)` — threshold doubles each step: 1, 2, 4, 8, 16 …
+
+Effect: as balance grows, the lot tier advances instead of stalling at 1.0.
+Each tier upgrade adds one extra fold of safety margin to match the larger position size.
+
+| Balance tier | n selected | lots range | safety folds |
+|---|---|---|---|
+| base | 6 | 0 – 0.99 | 6 |
+| ×1 | 7 | 1 – 1.99 | 7 |
+| ×2 | 8 | 2 – 3.99 | 8 |
+| ×4 | 9 | 4 – 7.99 | 9 |
+
+`InpMaxFolds` remains a hard cap: if balance would require `n > InpMaxFolds`, the EA
+keeps `n = InpMaxFolds` (lots may exceed the tier threshold in that case).
+
+The corresponding Excel formula change: `lots < 1` → `lots < 2^(ns−6)`.
+
+---
+
 ## v1.37 — 2026-06-22
 
 ### Fix — Quick cycles (limit fills + TP in same tick) now logged in DB

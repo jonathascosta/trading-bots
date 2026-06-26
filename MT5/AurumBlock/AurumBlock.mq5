@@ -8,13 +8,12 @@
 //+------------------------------------------------------------------+
 #property copyright "Jonathas Costa"
 #property link      "https://github.com/jonathascosta/trading-bots"
-#property version   "1.37"
-#define EA_DASH_VER "v1.37"   // shown in dashboard — update together with #property version
+#property version   "1.39"
+#define EA_DASH_VER "v1.39"   // shown in dashboard — update together with #property version
 #include <Trade\Trade.mqh>
 
 //=== External inputs ==================================================
 input double InpFixedLots    = 0.0;    // Fixed lot size (0 = auto by balance)
-input int    InpMaxFolds     = 10;     // Scale-ins to support in auto lot sizing
 input double InpMinOrderDist = 130.0;  // Distance between scale-ins (pips)
 input double InpLotMultiplier = 2.0;   // Scale-in lot multiplier (2=double, 3=triple…)
 input int    InpUIScale      = 1;      // Dashboard scale: 1=normal, 2=Mac HiDPI/Retina
@@ -812,17 +811,23 @@ double GetDailyProfit()
 
 // Returns the initial lot size for a new cycle entry.
 // If InpFixedLots > 0: uses that value (override).
-// Otherwise: FLOOR(Balance / (13 * 100 * (2^(InpMaxFolds+2) - InpMaxFolds - 3)), 0.01)
-// The denominator covers the floating drawdown up to the point where the
-// (InpMaxFolds+1)th scale-in WOULD trigger — one extra interval of safety
-// beyond the last permitted scale-in, without opening that position.
+// Otherwise iterates n from 6 upward, stopping at the first n where lots < 2^(n-6):
+//   n=6 → lots < 1,  n=7 → lots < 2,  n=8 → lots < 4,  n=9 → lots < 8 …
+// The denominator grows as 2^n so lots converges for any finite balance;
+// n=30 is unreachable in practice (would require a balance > $10^12).
 double GetLots()
 {
     if(InpFixedLots > 0.0) return InpFixedLots;
-    double bal   = AccountInfoDouble(ACCOUNT_BALANCE);
-    double denom = 13.0 * 100.0 * (MathPow(2.0, InpMaxFolds + 2) - InpMaxFolds - 3.0);
-    double lots  = MathFloor(bal / denom / 0.01) * 0.01;
-    return NormalizeDouble(MathMax(lots, 0.01), 2);
+    double bal = AccountInfoDouble(ACCOUNT_BALANCE);
+    for(int n = 6; n <= 30; n++)
+    {
+        double denom     = 13.0 * 100.0 * (MathPow(2.0, n + 2) - n - 3.0);
+        double lots      = MathFloor(bal / denom / 0.01) * 0.01;
+        double threshold = MathPow(2.0, n - 6);   // 1, 2, 4, 8 …
+        if(lots < threshold)
+            return NormalizeDouble(MathMax(lots, 0.01), 2);
+    }
+    return 0.01;   // unreachable
 }
 
 //+------------------------------------------------------------------+

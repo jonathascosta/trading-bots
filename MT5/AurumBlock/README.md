@@ -1,7 +1,7 @@
 # AurumBlock
 
 **Platform:** MetaTrader 5  
-**Version:** 1.37  
+**Version:** 1.39  
 **Last updated:** 2026-06-09  
 **Based on:** [FvgBlock](../FvgBlock/) v3.87
 
@@ -51,17 +51,21 @@ Both high-impact (red) and moderate-impact (orange) events on the whitelist are 
 
 ## Lot sizing
 
+`GetLots()` uses a tiered formula that scales safely with balance. Starting from n=6, it iterates upward and selects the first n where `lot < 2^(n−6)`:
+
 ```
-lot = FLOOR( Balance / (13 × 100 × (2^(InpMaxFolds+2) − InpMaxFolds − 3)), 0.01 )
+lot(n) = FLOOR( Balance / (13 × 100 × (2^(n+2) − n − 3)), 0.01 )
+tier advances when lot(n) ≥ 2^(n−6)  →  try n+1
 ```
 
-Denominator equals the worst-case total floating exposure (in account-currency units per 0.01 lot) up to the point where an additional scale-in beyond `InpMaxFolds` would trigger — providing one full safety interval of buffer. Result is floored to the 0.01 grid; minimum is 0.01.
+Each tier adds one extra fold of safety margin to match the larger position. The loop is uncapped (runs to n=30 as a safety guard, unreachable below ~$10¹² balance).
 
-| Balance (USC) | InpMaxFolds=6 | InpMaxFolds=10 |
+| Lot range | n selected | Safety folds |
 |---|---|---|
-| 10 000 | 0.02 | 0.01 |
-| 70 000 | 0.11 | 0.02 |
-| 140 000 | 0.22 | 0.05 |
+| 0.01 – 0.99 | 6 | 6 |
+| 1.00 – 1.99 | 7 | 7 |
+| 2.00 – 3.99 | 8 | 8 |
+| 4.00 – 7.99 | 9 | 9 |
 
 Set `InpFixedLots > 0` to override with a fixed lot without recompiling. Scale-in lots multiply the previous position's lot by `InpLotMultiplier` regardless of this setting.
 
@@ -115,7 +119,6 @@ Most settings are `#define` constants — change them and recompile. The runtime
 | `InpFixedLots` | 0.0 | Fixed initial lot (0 = auto by balance formula) |
 | `InpMinOrderDist` | 130.0 | Pips between scale-in levels (was `#define`, now tunable at runtime / in optimizer) |
 | `InpLotMultiplier` | 2.0 | Scale-in lot multiplier (2 = double, 3 = triple, 4 = quadruple) |
-| `InpMaxFolds` | 10 | Number of scale-ins the auto-lot formula is sized to support |
 | `InpSafeMode` | false | Restrict new cycle entries to two UTC+1 windows (01:15–05:45 and 08:15–10:45) |
 | `InpUIScale` | 1 | Dashboard scale: `1` = Windows / non-Retina Mac; `2` = Mac Retina / HiDPI |
 | `InpLogTrades` | true | Log every order and position close to SQLite |
