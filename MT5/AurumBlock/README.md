@@ -1,7 +1,7 @@
 # AurumBlock
 
 **Platform:** MetaTrader 5  
-**Version:** 1.39  
+**Version:** 1.40  
 **Last updated:** 2026-06-09  
 **Based on:** [FvgBlock](../FvgBlock/) v3.87
 

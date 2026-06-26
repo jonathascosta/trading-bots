@@ -1,5 +1,22 @@
 # AurumBlock EA — Changelog
 
+## v1.40 — 2026-06-26
+
+### Fix — Cycle close not logged when active block is too small (SIZE GUARD bug)
+
+**Problem:** The SIZE GUARD early return in `ManageTrade()` fired before the state
+machine update and `DBLogCycle()`. If a new (small) FVG block was detected while a
+cycle was already open, every subsequent tick returned early — the `STATE_SELLS →
+STATE_IDLE` transition was never detected and the cycle was never logged to the DB.
+Manual closes and TP hits during this window were silently dropped.
+
+**Fix:** Moved the state machine selection, DB transition detection (`DBLogCycle`,
+`DBLogPnLSnapshot`), and drawdown tracking to run **before** the SIZE GUARD. The
+guard now only blocks new entries and scale-ins, as intended. No change to trading
+behaviour.
+
+---
+
 ## v1.39 — 2026-06-23
 
 ### Change — Auto-lot: removed InpMaxFolds; tiered threshold is now uncapped

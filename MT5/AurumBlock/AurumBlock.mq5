@@ -8,8 +8,8 @@
 //+------------------------------------------------------------------+
 #property copyright "Jonathas Costa"
 #property link      "https://github.com/jonathascosta/trading-bots"
-#property version   "1.39"
-#define EA_DASH_VER "v1.39"   // shown in dashboard — update together with #property version
+#property version   "1.40"
+#define EA_DASH_VER "v1.40"   // shown in dashboard — update together with #property version
 #include <Trade\Trade.mqh>
 
 //=== External inputs ==================================================
@@ -1312,27 +1312,8 @@ void ManageTrade()
             if(_today != g_lastSnapshotDate) { g_lastSnapshotDate = _today; DBLogPnLSnapshot("end_of_day"); }
         }
     }
-    // SIZE GUARD
-    double abH = g_blocks[g_activeIdx].blockHigh;
-    double abL = g_blocks[g_activeIdx].blockLow;
-    // Include the live (unclosed) bar's range so TP tracks the same midline as the visual drawing.
-    if(g_blocks[g_activeIdx].startTime < iTime(Symbol(), Period(), 0))
-    {
-        abH = MathMax(abH, iHigh(Symbol(), Period(), 0));
-        abL = MathMin(abL, iLow(Symbol(), Period(), 0));
-    }
-    if(((abH-abL)/PIP_VALUE) < BLK_MIN_SIZE) return;
-    double zs      = (abH-abL)*(ZONE_PCT/100.0);
-    double topBand = abH-zs, botBand = abL+zs;
-    double midPrice= (abH+abL)/2.0;
-    double midTop  = midPrice+zs;
-    double midBot  = midPrice-zs;
-    double dist    = InpMinOrderDist * PIP_VALUE;
-    int    digits  = (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS);
-    double ask     = SymbolInfoDouble(Symbol(), SYMBOL_ASK);
-    double bid     = SymbolInfoDouble(Symbol(), SYMBOL_BID);
-
-    // State machine selection
+    // State machine selection — runs before SIZE GUARD so cycle close transitions
+    // are always detected even when the active block is too small for new entries.
     if(sellPos > 0)
     {
         DeleteAllPending(ORDER_TYPE_BUY_LIMIT);
@@ -1415,6 +1396,27 @@ void ManageTrade()
         }
         if(_fp < g_cyclePeakDD) g_cyclePeakDD = _fp;
     }
+
+    // SIZE GUARD — blocks new entries and scale-ins when FVG range is too small.
+    // State machine and DB logging run before this so cycle closes are always captured.
+    double abH = g_blocks[g_activeIdx].blockHigh;
+    double abL = g_blocks[g_activeIdx].blockLow;
+    // Include the live (unclosed) bar's range so TP tracks the same midline as the visual drawing.
+    if(g_blocks[g_activeIdx].startTime < iTime(Symbol(), Period(), 0))
+    {
+        abH = MathMax(abH, iHigh(Symbol(), Period(), 0));
+        abL = MathMin(abL, iLow(Symbol(), Period(), 0));
+    }
+    if(((abH-abL)/PIP_VALUE) < BLK_MIN_SIZE) return;
+    double zs      = (abH-abL)*(ZONE_PCT/100.0);
+    double topBand = abH-zs, botBand = abL+zs;
+    double midPrice= (abH+abL)/2.0;
+    double midTop  = midPrice+zs;
+    double midBot  = midPrice-zs;
+    double dist    = InpMinOrderDist * PIP_VALUE;
+    int    digits  = (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS);
+    double ask     = SymbolInfoDouble(Symbol(), SYMBOL_ASK);
+    double bid     = SymbolInfoDouble(Symbol(), SYMBOL_BID);
 
     bool canOpen = IsTradingAllowed() && !IsNewsTime() && !IsSessionPauseTime() && !g_noNewCycles && IsSafeTime();
 
