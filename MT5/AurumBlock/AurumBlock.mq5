@@ -8,18 +8,25 @@
 //+------------------------------------------------------------------+
 #property copyright "Jonathas Costa"
 #property link      "https://github.com/jonathascosta/trading-bots"
-#property version   "1.40"
-#define EA_DASH_VER "v1.40"   // shown in dashboard — update together with #property version
+#property version   "1.51"
+#define EA_DASH_VER "v1.51"   // shown in dashboard — update together with #property version
 #include <Trade\Trade.mqh>
 
 //=== External inputs ==================================================
 input double InpFixedLots    = 0.0;    // Fixed lot size (0 = auto by balance)
 input double InpMinOrderDist = 130.0;  // Distance between scale-ins (pips)
 input double InpLotMultiplier = 2.0;   // Scale-in lot multiplier (2=double, 3=triple…)
+input int    InpAutoLotFolds = 10;     // Scale-ins the auto-lot budgets for (only when InpFixedLots=0)
 input int    InpUIScale      = 1;      // Dashboard scale: 1=normal, 2=Mac HiDPI/Retina
 
 input group  "=== Safe Mode ==="
-input bool   InpSafeMode     = false;  // restrict new entries to safe time windows
+input bool   InpSafeMode     = true;   // restrict new entries to safe time windows
+
+input group  "=== Risk ==="
+input double InpMaxLossPct   = 12.0;   // Kill switch: halt when day P&L + floating <= -this % of balance (0 = off)
+
+input group  "=== Alerts ==="
+input int    InpAlertScaleIns = 4;     // Push alert when scale-ins exceed this (0 = off)
 
 input group  "=== DB Logging ==="
 input bool   InpLogTrades    = true;   // log order/position lifecycle
@@ -57,23 +64,25 @@ input bool   InpLogSnapshots = true;   // log periodic P&L snapshots
 #define NYSE_M              30
 
 //=== News filter ====================================================
-#define NEWS_PRE_SEC        8100        // 135 min before → no new entries
-#define NEWS_POST_SEC       900         //  15 min after  → resume
+// Two nested zones around each (UTC) event:
+//   soft: [-180 min, +15 min] → no new entries (scale-ins still allowed)
+//   hard: [ -60 min, +15 min] → freeze everything (scale-ins blocked too)
+#define NEWS_PRE_SOFT_SEC   10800       // 180 min before → no new entries
+#define NEWS_PRE_HARD_SEC    3600       //  60 min before → also block scale-ins
+#define NEWS_POST_SEC         900       //  15 min after  → resume normal
 #define NEWS_FILE           "fvg_news.csv"
 #define NEXT_SESSION_WARN_MIN  60       // show session-pause warning up to X min before it starts
 #define NEXT_NEWS_WARN_MIN     90       // amber warning when news pre-block starts in < X min
 #define NEXT_NEWS_SHOW_H       8        // show next news event if it occurs within X hours
 
-//=== Safe Mode windows (local UTC+1) — new entries only inside these ranges =====
-// Window 1: 01:15 – 05:45  |  Window 2: 08:15 – 10:45
-#define SAFE_WIN1_START_H   1
-#define SAFE_WIN1_START_M   15
-#define SAFE_WIN1_STOP_H    5
-#define SAFE_WIN1_STOP_M    45
-#define SAFE_WIN2_START_H   8
-#define SAFE_WIN2_START_M   15
-#define SAFE_WIN2_STOP_H    10
-#define SAFE_WIN2_STOP_M    45
+//=== Safe Mode window (local UTC+1) — new entries only inside this range ========
+// Single continuous window: 01:15 – 10:45. The London open pause (07:45–08:15) is
+// the only interruption to new entries, handled by IsSessionPauseTime; scale-ins
+// continue through it because safe mode keeps them enabled.
+#define SAFE_WIN_START_H    1
+#define SAFE_WIN_START_M    15
+#define SAFE_WIN_STOP_H     10
+#define SAFE_WIN_STOP_M     45
 
 //=== Web-panel pause flag (shared with the Flask control panel) =====
 #define PAUSE_FILE          "fvg_pause.flag"
@@ -100,7 +109,7 @@ input bool   InpLogSnapshots = true;   // log periodic P&L snapshots
 // True ARGB transparency is only achievable via ResourceCreate + OBJ_BITMAP_LABEL.
 // OBJ_RECTANGLE_LABEL ignores the alpha channel in OBJPROP_BGCOLOR on MT5.
 #define DASH_PAN_W          370     // panel width  (px)
-#define DASH_PAN_H          179     // panel height (px) — 7 rows × 24 px + margins
+#define DASH_PAN_H          203     // panel height (px) — 8 rows × 24 px + margins
 #define DASH_PAN_BOT        10      // gap between panel bottom and chart bottom (px)
 #define DASH_PAN_RES        "::AurBlock_Pan"   // in-memory bitmap resource name
 #define DASH_PAN_ALPHA      225     // 0=transparent 255=opaque → 88% opacity
@@ -157,6 +166,14 @@ datetime g_cycleOpenTime    = 0;
 int      g_cycleStartDealCount = 0;
 string   g_pendingDirection = "";   // "sell"/"buy" set when initial limit is placed; enables quick-cycle logging
 double   g_cyclePeakDD     = 0.0;  // most negative floating P&L seen during current cycle
+int      g_lastAlertedFold = 0;    // highest fold count already alerted this cycle (re-alerts on each new fold)
+double   g_ddDayMin        = 0.0;  // worst floating DD seen today (panel stats; DB-seeded at init)
+double   g_ddWeekMin       = 0.0;  // worst floating DD seen this week
+double   g_ddAllMin        = 0.0;  // worst floating DD ever (terminal GV "AUR_DD_ALL" survives DB pruning)
+datetime g_ddDayAnchor     = 0;    // LocalDayStart the day minimum belongs to
+datetime g_ddWeekAnchor    = 0;    // LocalWeekStart the week minimum belongs to
+bool     g_statsAllDirty   = true; // all-time panel stats need a recompute (set on cycle close)
+bool     g_halted          = false;// kill switch fired — no entries/scale-ins until user deletes GV "AUR_HALT"
 ulong    g_openTickets[];
 int      g_openTicketCount  = 0;
 bool     g_prevNews         = false;
@@ -183,6 +200,8 @@ int      g_lastArchiveMonth = -1;
 #define N_DASH2  "AUR_DASH_2"
 #define N_DASH3  "AUR_DASH_3"
 #define N_DASH4  "AUR_DASH_4"
+#define N_DASHA  "AUR_DASH_A"   // all-time stats row
+#define N_WARN   "AUR_WARN"     // blinking top-centre fold warning banner
 #define N_PFX    "AUR_"
 
 //+------------------------------------------------------------------+
@@ -437,14 +456,30 @@ bool IsTradingAllowed()
     return (current >= start || current < stop);   // overnight window
 }
 
-// Asymmetric news block: [event − 135 min, event + 15 min] (UTC events).
-bool IsNewsTime()
+// News blocks anchored on UTC event times. Soft zone blocks new entries from 180 min
+// before; hard zone (nested inside) also blocks scale-ins from 60 min before. Both end
+// 15 min after the event, then normal behaviour resumes.
+
+// True from 180 min before to 15 min after any event — blocks new cycle entries.
+bool IsNewsNoEntry()
 {
     datetime now = TimeCurrent() - (datetime)(SERVER_OFFSET * 3600);   // UTC
     for(int i = 0; i < g_newsCount; i++)
     {
         long diff = (long)now - (long)g_newsEvents[i];
-        if(diff >= -(long)NEWS_PRE_SEC && diff <= (long)NEWS_POST_SEC) return true;
+        if(diff >= -(long)NEWS_PRE_SOFT_SEC && diff <= (long)NEWS_POST_SEC) return true;
+    }
+    return false;
+}
+
+// True from 60 min before to 15 min after any event — also freezes scale-ins.
+bool IsNewsNoScale()
+{
+    datetime now = TimeCurrent() - (datetime)(SERVER_OFFSET * 3600);   // UTC
+    for(int i = 0; i < g_newsCount; i++)
+    {
+        long diff = (long)now - (long)g_newsEvents[i];
+        if(diff >= -(long)NEWS_PRE_HARD_SEC && diff <= (long)NEWS_POST_SEC) return true;
     }
     return false;
 }
@@ -496,8 +531,7 @@ bool IsPaused()
 // True when new cycle entries are allowed under Safe Mode rules.
 // Always returns true when InpSafeMode=false.
 // When enabled, new entries are only permitted during:
-//   Window 1: 01:15 – 05:45 UTC+1
-//   Window 2: 08:15 – 10:45 UTC+1
+//   01:15 – 10:45 UTC+1 (London open pause 07:45–08:15 carved out by IsSessionPauseTime)
 // Scale-ins on existing positions are never blocked by this function.
 bool IsSafeTime()
 {
@@ -505,11 +539,9 @@ bool IsSafeTime()
     MqlDateTime dt;
     TimeToStruct(LocalNow(), dt);
     int cur = dt.hour * 60 + dt.min;
-    int w1s = SAFE_WIN1_START_H * 60 + SAFE_WIN1_START_M;
-    int w1e = SAFE_WIN1_STOP_H  * 60 + SAFE_WIN1_STOP_M;
-    int w2s = SAFE_WIN2_START_H * 60 + SAFE_WIN2_START_M;
-    int w2e = SAFE_WIN2_STOP_H  * 60 + SAFE_WIN2_STOP_M;
-    return (cur >= w1s && cur < w1e) || (cur >= w2s && cur < w2e);
+    int s = SAFE_WIN_START_H * 60 + SAFE_WIN_START_M;
+    int e = SAFE_WIN_STOP_H  * 60 + SAFE_WIN_STOP_M;
+    return (cur >= s && cur < e);
 }
 
 //+------------------------------------------------------------------+
@@ -789,6 +821,15 @@ datetime LocalWeekStart()
     return TimeCurrent() - (datetime)sec;
 }
 
+// Reset the day/week worst-DD accumulators when their window rolls over.
+// Called before every read or update of g_ddDayMin / g_ddWeekMin.
+void RollDDWindows()
+{
+    datetime ds = LocalDayStart(), ws = LocalWeekStart();
+    if(ds != g_ddDayAnchor)  { g_ddDayAnchor  = ds; g_ddDayMin  = 0.0; }
+    if(ws != g_ddWeekAnchor) { g_ddWeekAnchor = ws; g_ddWeekMin = 0.0; }
+}
+
 // Realised P&L (profit + commission + swap) for closed EA trades since local midnight.
 double GetDailyProfit()
 {
@@ -811,23 +852,51 @@ double GetDailyProfit()
 
 // Returns the initial lot size for a new cycle entry.
 // If InpFixedLots > 0: uses that value (override).
-// Otherwise iterates n from 6 upward, stopping at the first n where lots < 2^(n-6):
-//   n=6 → lots < 1,  n=7 → lots < 2,  n=8 → lots < 4,  n=9 → lots < 8 …
-// The denominator grows as 2^n so lots converges for any finite balance;
-// n=30 is unreachable in practice (would require a balance > $10^12).
-double GetLots()
+// Otherwise the auto-lot budgets for InpAutoLotFolds scale-ins (default 6): it iterates
+// n from that base upward, stopping at the first n where lots < 2^(n-base):
+//   n=base → lots < 1,  base+1 → lots < 2,  base+2 → lots < 4 …
+// Higher base = sizes the initial lot to survive more folds → smaller, more conservative.
+// The denominator grows as 2^n so lots converges for any finite balance.
+// Auto-lot size; reports the fold tier (n) it settles on via outFolds (>= base).
+double GetAutoLot(int &outFolds)
 {
-    if(InpFixedLots > 0.0) return InpFixedLots;
-    double bal = AccountInfoDouble(ACCOUNT_BALANCE);
-    for(int n = 6; n <= 30; n++)
+    int    base = (InpAutoLotFolds > 0) ? InpAutoLotFolds : 10;
+    double bal  = AccountInfoDouble(ACCOUNT_BALANCE);
+    for(int n = base; n <= base + 24; n++)
     {
         double denom     = 13.0 * 100.0 * (MathPow(2.0, n + 2) - n - 3.0);
         double lots      = MathFloor(bal / denom / 0.01) * 0.01;
-        double threshold = MathPow(2.0, n - 6);   // 1, 2, 4, 8 …
+        double threshold = MathPow(2.0, n - base);   // 1, 2, 4, 8 …
         if(lots < threshold)
+        {
+            outFolds = n;
             return NormalizeDouble(MathMax(lots, 0.01), 2);
+        }
     }
+    outFolds = base + 24;
     return 0.01;   // unreachable
+}
+
+double GetLots()
+{
+    if(InpFixedLots > 0.0) return InpFixedLots;
+    int folds;
+    return GetAutoLot(folds);
+}
+
+// Push notification to the MT5 mobile app when a cycle exceeds the scale-in threshold.
+// In the tester notifications are unavailable, so log to the journal instead.
+void SendScaleAlert(const string dir, int scaleIns)
+{
+    ENUM_POSITION_TYPE pt = (dir == "SELL") ? POSITION_TYPE_SELL : POSITION_TYPE_BUY;
+    // Mixed %s/%d/%f in StringFormat is unstable in MQL5 → concatenate.
+    string msg = "AurumBlock " + Symbol() + " " + dir + ": " + IntegerToString(scaleIns)
+               + " dobras | " + DoubleToString(GetTotalVolume(pt), 2) + " lots | BE "
+               + DoubleToString(GetWeightedBreakEven(pt), 2);
+    if(IsTesting()) { Print("[ALERT] ", msg); return; }
+    Alert(msg);   // desktop popup + sound
+    if(!SendNotification(msg))
+        Print("SendNotification failed (set MetaQuotes ID in Tools>Options>Notifications): ", msg);
 }
 
 //+------------------------------------------------------------------+
@@ -840,7 +909,7 @@ string DBGetActiveNewsName()
     for(int i = 0; i < g_newsCount; i++)
     {
         long diff = (long)nowUtc - (long)g_newsEvents[i];
-        if(diff >= -(long)NEWS_PRE_SEC && diff <= (long)NEWS_POST_SEC)
+        if(diff >= -(long)NEWS_PRE_SOFT_SEC && diff <= (long)NEWS_POST_SEC)
             return (i < ArraySize(g_newsNames) ? g_newsNames[i] : "");
     }
     return "";
@@ -865,6 +934,36 @@ long   DBLastInsertId()
     if(DatabaseRead(req)) DatabaseColumnLong(req, 0, id);
     DatabaseFinalize(req);
     return id;
+}
+
+// Seed today/this-week/all-time worst-DD so panel stats survive EA restarts.
+// cycles.open_time and LocalDayStart/LocalWeekStart share the same server-time base.
+// All-time also merges the terminal global variable, which outlives DB pruning (30 d).
+void DBSeedDDMinima()
+{
+    RollDDWindows();
+    if(GlobalVariableCheck("AUR_DD_ALL"))
+    {
+        double gv = GlobalVariableGet("AUR_DD_ALL");
+        if(gv < g_ddAllMin) g_ddAllMin = gv;
+    }
+    if(g_db == INVALID_HANDLE) return;
+    int req = DatabasePrepare(g_db, StringFormat(
+        "SELECT MIN(CASE WHEN open_time>=%d THEN max_dd END), "
+        "MIN(CASE WHEN open_time>=%d THEN max_dd END), MIN(max_dd) FROM cycles;",
+        (long)LocalDayStart(), (long)LocalWeekStart()));
+    if(req == INVALID_HANDLE) return;
+    if(DatabaseRead(req))
+    {
+        double dDay = 0.0, dWeek = 0.0, dAll = 0.0;
+        DatabaseColumnDouble(req, 0, dDay);
+        DatabaseColumnDouble(req, 1, dWeek);
+        DatabaseColumnDouble(req, 2, dAll);
+        if(dDay  < g_ddDayMin)  g_ddDayMin  = dDay;
+        if(dWeek < g_ddWeekMin) g_ddWeekMin = dWeek;
+        if(dAll  < g_ddAllMin)  g_ddAllMin  = dAll;
+    }
+    DatabaseFinalize(req);
 }
 
 void DBInit()
@@ -1051,7 +1150,7 @@ void DBLogFilterEvent(const string filterType, const string state, const string 
 void DBCheckFilterTransitions()
 {
     if(!InpLogFilters || g_db == INVALID_HANDLE || IsTesting()) return;
-    bool newsNow    = IsNewsTime();
+    bool newsNow    = IsNewsNoEntry();
     bool pauseNow   = IsSessionPauseTime();
     bool tradingNow = IsTradingAllowed();
     bool forceNow   = IsForceCloseTime();
@@ -1255,6 +1354,42 @@ void ManageTrade()
     int sellPend = CountPending(ORDER_TYPE_SELL_LIMIT);
     int buyPend  = CountPending(ORDER_TYPE_BUY_LIMIT);
 
+    // KILL SWITCH — absolute loss stop: when day realized + floating P&L reaches
+    // -InpMaxLossPct% of current balance, close everything and halt until the user
+    // deletes the terminal global variable AUR_HALT (F3). The state machine below
+    // keeps running while halted so the forced close is still logged to the DB.
+    if(g_halted)
+    {
+        if(sellPend > 0 || buyPend > 0)
+        {
+            DeleteAllPending(ORDER_TYPE_SELL_LIMIT);
+            DeleteAllPending(ORDER_TYPE_BUY_LIMIT);
+            sellPend = 0; buyPend = 0;
+        }
+    }
+    else if(InpMaxLossPct > 0)
+    {
+        double lossLimit = AccountInfoDouble(ACCOUNT_BALANCE) * InpMaxLossPct / 100.0;
+        if(GetDailyProfit() + GetFloatingPnL() <= -lossLimit)
+        {
+            CloseAllPositions();
+            DeleteAllPending(ORDER_TYPE_SELL_LIMIT);
+            DeleteAllPending(ORDER_TYPE_BUY_LIMIT);
+            sellPend = 0; buyPend = 0;
+            g_halted = true;
+            string msg = "AurumBlock " + Symbol() + " KILL SWITCH: loss reached "
+                       + DoubleToString(InpMaxLossPct, 1) + "% of balance — all closed, bot HALTED"
+                       + " (delete GV AUR_HALT to resume)";
+            if(IsTesting()) Print("[ALERT] ", msg);
+            else
+            {
+                GlobalVariableSet("AUR_HALT", 1.0);
+                Alert(msg);
+                if(!SendNotification(msg)) Print("SendNotification failed: ", msg);
+            }
+        }
+    }
+
     // HOUSEKEEPING
     datetime curBlockTime = g_blocks[g_activeIdx].startTime;
     if(curBlockTime != g_prevBlockTime)
@@ -1277,7 +1412,7 @@ void ManageTrade()
         g_newFvgThisBar = false;
     }
     // Cancel pending limits when trading is closed, in news/session pause, or outside safe window
-    if(!IsTradingAllowed() || IsNewsTime() || IsSessionPauseTime() || (InpSafeMode && !IsSafeTime()))
+    if(!IsTradingAllowed() || IsNewsNoEntry() || IsSessionPauseTime() || (InpSafeMode && !IsSafeTime()))
     {
         if(sellPend > 0 || buyPend > 0)
         {
@@ -1286,6 +1421,13 @@ void ManageTrade()
             sellPend = 0; buyPend = 0;
         }
     }
+    // Cancel a resting limit on an exhausted band. The touch counter can reach the
+    // threshold after the order was placed (counts update on bar close / cycle open),
+    // so the entry gate alone cannot retire an already-resting order.
+    if(g_topUnstable && g_topTouchCount >= TOUCH_WARN_COUNT && sellPend > 0)
+        { DeleteAllPending(ORDER_TYPE_SELL_LIMIT); sellPend = 0; }
+    if(g_botUnstable && g_botTouchCount >= TOUCH_WARN_COUNT && buyPend > 0)
+        { DeleteAllPending(ORDER_TYPE_BUY_LIMIT);  buyPend = 0; }
     // END OF DAY — 19:45 onwards: close if positive, allow scale-ins if negative
     if(IsForceCloseTime())
     {
@@ -1327,7 +1469,7 @@ void ManageTrade()
         g_state = STATE_BUYS;
     }
     else if(sellPend > 0 || buyPend > 0) g_state = STATE_PENDING;
-    else                                 { g_state = STATE_IDLE; g_tpFrozen = false; }
+    else                                 { g_state = STATE_IDLE; g_tpFrozen = false; g_lastAlertedFold = 0; }
 
     // DB: detect cycle open/close transitions
     if(g_prevState != STATE_SELLS && g_prevState != STATE_BUYS &&
@@ -1362,6 +1504,20 @@ void ManageTrade()
             g_cycleStartDealCount = _j;
         }
         g_cyclePeakDD = 0.0;
+        // Opening a cycle IS a visit to that band — count it immediately, even when
+        // price never left the zone since the previous cycle (bar-close hysteresis
+        // would merge consecutive cycles into one touch). Setting the in-zone flag
+        // stops ProcessBar from counting the same visit again at bar close.
+        if(g_state == STATE_SELLS)
+        {
+            g_topUnstable = true; g_topTouchCount++; g_topInZone = true;
+            DBLogZoneTouch("top", SymbolInfoDouble(Symbol(), SYMBOL_ASK), g_topTouchCount);
+        }
+        else
+        {
+            g_botUnstable = true; g_botTouchCount++; g_botInZone = true;
+            DBLogZoneTouch("bot", SymbolInfoDouble(Symbol(), SYMBOL_BID), g_botTouchCount);
+        }
     }
     if((g_prevState == STATE_SELLS || g_prevState == STATE_BUYS) && g_state == STATE_IDLE)
     {
@@ -1370,6 +1526,7 @@ void ManageTrade()
         g_cycleOpenTime  = 0;
         g_tradeBlockTime = 0;
         g_cyclePeakDD    = 0.0;
+        g_statsAllDirty  = true;
     }
     else if(g_prevState == STATE_PENDING && g_state == STATE_IDLE && g_pendingDirection != "")
     {
@@ -1377,7 +1534,8 @@ void ManageTrade()
         // g_cycleStartDealCount was anchored when the limit was placed, so DBLogCycle finds the deals.
         DBLogCycle(g_pendingDirection);
         DBLogPnLSnapshot("cycle_close");
-        g_cyclePeakDD = 0.0;
+        g_cyclePeakDD   = 0.0;
+        g_statsAllDirty = true;
     }
     if(g_state == STATE_IDLE) g_pendingDirection = "";
     g_prevState = g_state;
@@ -1395,6 +1553,14 @@ void ManageTrade()
             _fp += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
         }
         if(_fp < g_cyclePeakDD) g_cyclePeakDD = _fp;
+        RollDDWindows();
+        if(_fp < g_ddDayMin)  g_ddDayMin  = _fp;
+        if(_fp < g_ddWeekMin) g_ddWeekMin = _fp;
+        if(_fp < g_ddAllMin)
+        {
+            g_ddAllMin = _fp;
+            if(!IsTesting()) GlobalVariableSet("AUR_DD_ALL", g_ddAllMin);
+        }
     }
 
     // SIZE GUARD — blocks new entries and scale-ins when FVG range is too small.
@@ -1418,7 +1584,7 @@ void ManageTrade()
     double ask     = SymbolInfoDouble(Symbol(), SYMBOL_ASK);
     double bid     = SymbolInfoDouble(Symbol(), SYMBOL_BID);
 
-    bool canOpen = IsTradingAllowed() && !IsNewsTime() && !IsSessionPauseTime() && !g_noNewCycles && IsSafeTime();
+    bool canOpen = !g_halted && IsTradingAllowed() && !IsNewsNoEntry() && !IsSessionPauseTime() && !g_noNewCycles && IsSafeTime();
 
     // A band is "exhausted" once it has been touched ≥ TOUCH_WARN_COUNT times.
     // No new initial entries are opened on an exhausted side; the opposite side
@@ -1481,7 +1647,7 @@ void ManageTrade()
                     UpdatePendingOrder(ORDER_TYPE_SELL_LIMIT, topBand, midTop);
             }
         }
-        if((IsTradingAllowed() || g_noNewCycles) && !IsNewsTime() && (!IsSessionPauseTime() || InpSafeMode))
+        if(!g_halted && (IsTradingAllowed() || g_noNewCycles) && !IsNewsNoScale() && (!IsSessionPauseTime() || InpSafeMode))
         {
             double lastPrice=0, lastLots=0; datetime lastTime=0;
             if(GetLastPosition(POSITION_TYPE_SELL, lastPrice, lastLots, lastTime))
@@ -1495,11 +1661,15 @@ void ManageTrade()
                     double newBECost = NormalizeDouble(newBE - COST_PER_LOT, digits);
                     if(g_trade.Sell(newLots, NULL, 0.0, 0.0, newBECost, "AUR_SS"))
                     {
-                        ulong  _ssTk = g_trade.ResultOrder();   // capture before UpdateAllTPs overwrites CTrade result
-                        double _ssPr = g_trade.ResultPrice();
-                        UpdateAllTPs(POSITION_TYPE_SELL, newBECost);
+                        ulong  _ssTk      = g_trade.ResultOrder();   // capture before UpdateAllTPs overwrites CTrade result
+                        double _ssPr      = g_trade.ResultPrice();
+                        double realBECost = NormalizeDouble((curBE*totalVol + _ssPr*newLots)/(totalVol+newLots) - COST_PER_LOT, digits);
+                        UpdateAllTPs(POSITION_TYPE_SELL, realBECost);
                         g_tpFrozen = false;
-                        DBLogTrade("scale_sell", _ssTk, newLots, _ssPr, newBECost);
+                        DBLogTrade("scale_sell", _ssTk, newLots, _ssPr, realBECost);
+                        // sellPos = scale-ins now placed this cycle (initial not counted)
+                        if(InpAlertScaleIns > 0 && sellPos > InpAlertScaleIns && sellPos > g_lastAlertedFold)
+                        { SendScaleAlert("SELL", sellPos); g_lastAlertedFold = sellPos; }
                     }
                 }
             }
@@ -1523,7 +1693,7 @@ void ManageTrade()
                     UpdatePendingOrder(ORDER_TYPE_BUY_LIMIT, botBand, midBot);
             }
         }
-        if((IsTradingAllowed() || g_noNewCycles) && !IsNewsTime() && (!IsSessionPauseTime() || InpSafeMode))
+        if(!g_halted && (IsTradingAllowed() || g_noNewCycles) && !IsNewsNoScale() && (!IsSessionPauseTime() || InpSafeMode))
         {
             double lastPrice=0, lastLots=0; datetime lastTime=0;
             if(GetLastPosition(POSITION_TYPE_BUY, lastPrice, lastLots, lastTime))
@@ -1537,11 +1707,15 @@ void ManageTrade()
                     double newBECost = NormalizeDouble(newBE + COST_PER_LOT, digits);
                     if(g_trade.Buy(newLots, NULL, 0.0, 0.0, newBECost, "AUR_BS"))
                     {
-                        ulong  _bsTk = g_trade.ResultOrder();   // capture before UpdateAllTPs overwrites CTrade result
-                        double _bsPr = g_trade.ResultPrice();
-                        UpdateAllTPs(POSITION_TYPE_BUY, newBECost);
+                        ulong  _bsTk      = g_trade.ResultOrder();   // capture before UpdateAllTPs overwrites CTrade result
+                        double _bsPr      = g_trade.ResultPrice();
+                        double realBECost = NormalizeDouble((curBE*totalVol + _bsPr*newLots)/(totalVol+newLots) + COST_PER_LOT, digits);
+                        UpdateAllTPs(POSITION_TYPE_BUY, realBECost);
                         g_tpFrozen = false;
-                        DBLogTrade("scale_buy", _bsTk, newLots, _bsPr, newBECost);
+                        DBLogTrade("scale_buy", _bsTk, newLots, _bsPr, realBECost);
+                        // buyPos = scale-ins now placed this cycle (initial not counted)
+                        if(InpAlertScaleIns > 0 && buyPos > InpAlertScaleIns && buyPos > g_lastAlertedFold)
+                        { SendScaleAlert("BUY", buyPos); g_lastAlertedFold = buyPos; }
                     }
                 }
             }
@@ -1571,7 +1745,7 @@ long GetNewsBlockInfo(string &outName)
     for(int i = 0; i < g_newsCount; i++)
     {
         long diff = (long)now - (long)g_newsEvents[i];
-        if(diff >= -(long)NEWS_PRE_SEC && diff <= (long)NEWS_POST_SEC)
+        if(diff >= -(long)NEWS_PRE_SOFT_SEC && diff <= (long)NEWS_POST_SEC)
         {
             outName = g_newsNames[i];
             datetime resume = g_newsEvents[i] + (datetime)NEWS_POST_SEC;
@@ -1670,7 +1844,7 @@ long GetNextSessionPauseStart(string &outSession)
 bool GetNextNewsInfo(long &outSecsToBlock, long &outSecsToEvent,
                      string &outName, string &outLocalTime)
 {
-    if(IsNewsTime()) return false;   // already in a news block — status row handles it
+    if(IsNewsNoEntry()) return false;   // already in a news block — status row handles it
 
     datetime now = TimeCurrent() - (datetime)(SERVER_OFFSET * 3600);   // UTC
     long showWindow = (long)NEXT_NEWS_SHOW_H * 3600;
@@ -1681,8 +1855,8 @@ bool GetNextNewsInfo(long &outSecsToBlock, long &outSecsToEvent,
         if(secsToEvent <= 0)          continue;   // past event
         if(secsToEvent > showWindow)  break;       // array is sorted; farther events → stop
 
-        long secsToBlock = secsToEvent - (long)NEWS_PRE_SEC;
-        if(secsToBlock < 0) continue;   // pre-block already started (IsNewsTime should be true)
+        long secsToBlock = secsToEvent - (long)NEWS_PRE_SOFT_SEC;
+        if(secsToBlock < 0) continue;   // pre-block already started (IsNewsNoEntry should be true)
 
         outSecsToBlock = secsToBlock;
         outSecsToEvent = secsToEvent;
@@ -1756,6 +1930,95 @@ void CreateDashboardBitmap()
 //+------------------------------------------------------------------+
 //|  Dashboard                                                       |
 //+------------------------------------------------------------------+
+// Right-align a value into a fixed-width cell (panel font is monospace Consolas).
+string PadL(const string s, int w)
+{
+    string r = s;
+    while(StringLen(r) < w) r = " " + r;
+    return r;
+}
+
+// Signed integer money format: "+543", "-2781", "0" (account currency, no decimals).
+string FmtSigned(double v)
+{
+    string s = DoubleToString(MathAbs(v), 0);
+    return (v > 0.5 ? "+" : (v < -0.5 ? "-" : "")) + s;
+}
+
+// One pass over account history from 'from': counts entries placed (ops), groups
+// exits into closed cycles (same direction within 30 s), tracks the max folds in a
+// single cycle and the realized net P&L. Each metric is also bucketed into the
+// secondary window starting at 'bucketStart' (pass 0 → bucket equals the totals).
+void ComputeHistoryStats(datetime from, datetime bucketStart,
+                         int &ops, int &opsB, int &cyc, int &cycB,
+                         int &mxF, int &mxFB, double &pnl, double &pnlB)
+{
+    ops = 0; opsB = 0; cyc = 0; cycB = 0; mxF = 0; mxFB = 0; pnl = 0.0; pnlB = 0.0;
+    if(!HistorySelect(from, TimeCurrent() + 1)) return;
+    int total = HistoryDealsTotal();
+
+    datetime exitTime[];
+    double   exitNet[];
+    int      exitDir[];
+    int ec = 0;
+
+    for(int i = 0; i < total; i++)
+    {
+        ulong tk = HistoryDealGetTicket(i);
+        if(HistoryDealGetString(tk, DEAL_SYMBOL) != Symbol())           continue;
+        if((long)HistoryDealGetInteger(tk, DEAL_MAGIC) != MAGIC_NUMBER) continue;
+
+        ENUM_DEAL_ENTRY deEntry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(tk, DEAL_ENTRY);
+        ENUM_DEAL_TYPE  deType  = (ENUM_DEAL_TYPE) HistoryDealGetInteger(tk, DEAL_TYPE);
+        datetime dt  = (datetime)HistoryDealGetInteger(tk, DEAL_TIME);
+
+        if(deEntry == DEAL_ENTRY_IN)
+        {
+            ops++;
+            if(dt >= bucketStart) opsB++;
+        }
+        else if(deEntry == DEAL_ENTRY_OUT)
+        {
+            double net = HistoryDealGetDouble(tk, DEAL_PROFIT)
+                       + HistoryDealGetDouble(tk, DEAL_COMMISSION)
+                       + HistoryDealGetDouble(tk, DEAL_SWAP);
+            int dir = (deType == DEAL_TYPE_BUY) ? 1 : -1;
+            ArrayResize(exitTime, ec+1);
+            ArrayResize(exitNet,  ec+1);
+            ArrayResize(exitDir,  ec+1);
+            exitTime[ec] = dt; exitNet[ec] = net; exitDir[ec] = dir; ec++;
+        }
+    }
+
+    // Cycle grouping: same direction within 30 seconds = one closed cycle.
+    // Group size = positions closed together → folds = size - 1.
+    // P&L and folds bucketed by the group's last exit time.
+    if(ec > 0)
+    {
+        double   curNet = exitNet[0];
+        int      curCnt = 1;
+        datetime lastT  = exitTime[0];
+        int      lastD  = exitDir[0];
+        for(int i = 1; i <= ec; i++)
+        {
+            if(i < ec && exitDir[i] == lastD && (long)(exitTime[i] - lastT) <= 30)
+            { curNet += exitNet[i]; curCnt++; lastT = exitTime[i]; }
+            else
+            {
+                int folds = curCnt - 1;
+                cyc++; pnl += curNet;
+                if(folds > mxF) mxF = folds;
+                if(lastT >= bucketStart)
+                {
+                    cycB++; pnlB += curNet;
+                    if(folds > mxFB) mxFB = folds;
+                }
+                if(i < ec) { curNet = exitNet[i]; curCnt = 1; lastT = exitTime[i]; lastD = exitDir[i]; }
+            }
+        }
+    }
+}
+
 void DashLabel(const string name, int yoff, const string text, color clr)
 {
     // yoff: row baseline measured from panel BOTTOM (logical px, same scale as before).
@@ -1787,7 +2050,12 @@ void UpdateDashboard()
 
     string statText;
     color  statColor;
-    if(paused)
+    if(g_halted)
+    {
+        statText  = "\x25A0  HALTED  max-loss \xB7 F3 del AUR_HALT";
+        statColor = C'255,70,70';                     // bright red
+    }
+    else if(paused)
     {
         statText  = "\x25A0  PAUSED  (web panel)";   // filled square
         statColor = C'248,113,113';                   // red
@@ -1796,7 +2064,10 @@ void UpdateDashboard()
     {
         // Truncate name to ≤18 chars so it fits the panel width
         string shortName = (StringLen(newsName) > 18) ? StringSubstr(newsName, 0, 18) + ".." : newsName;
-        statText  = "\x25B6  NEWS  " + shortName + "   \xBB " + FormatTimer(newsSecs);
+        if(IsNewsNoScale())   // hard zone — everything frozen
+            statText = "\x25B6  NEWS  " + shortName + "  frozen \xBB " + FormatTimer(newsSecs);
+        else                  // soft zone — new entries blocked, scale-ins still allowed
+            statText = "\x25C8  NEWS  " + shortName + "  scale-ins \xBB " + FormatTimer(newsSecs);
         statColor = C'251,191,36';                    // amber
     }
     else if(sessSecs >= 0)
@@ -1834,123 +2105,34 @@ void UpdateDashboard()
     else
         boxText = "Box  \x2013 \x2013";
 
-    // ── Trade statistics ─────────────────────────────────────────
+    // ── Trade statistics: ops / closed cycles / max folds / P&L per window ──
     datetime weekStart = LocalWeekStart();
     datetime dayStart  = LocalDayStart();
 
-    int  ciclosToday = 0, ciclosWeek = 0;
-    int  beCyclesToday = 0, aboveCyclesToday = 0;
-    int  beCyclesWeek  = 0, aboveCyclesWeek  = 0;
-    long minSec = -1, maxSec = 0, sumSec = 0;
-    int  durN = 0;
-
-    if(HistorySelect(weekStart, TimeCurrent() + 1))
+    // All-time row: the full-history pass grows with account age, so it is cached
+    // and refreshed only when a cycle closes (g_statsAllDirty) or every 60 s.
+    static int      s_atOps = 0, s_atCyc = 0, s_atMxF = 0;
+    static double   s_atPnl = 0.0;
+    static datetime s_atLastCalc = 0;
+    if(g_statsAllDirty || TimeCurrent() - s_atLastCalc >= 60)
     {
-        int total = HistoryDealsTotal();
-
-        long     posId[];
-        datetime posOpen[];
-        datetime posClose[];
-        int pc = 0;
-
-        datetime exitTime[];
-        double   exitNet[];
-        int      exitDir[];
-        int ec = 0;
-
-        for(int i = 0; i < total; i++)
-        {
-            ulong tk = HistoryDealGetTicket(i);
-            if(HistoryDealGetString(tk, DEAL_SYMBOL) != Symbol())           continue;
-            if((long)HistoryDealGetInteger(tk, DEAL_MAGIC) != MAGIC_NUMBER) continue;
-
-            ENUM_DEAL_ENTRY deEntry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(tk, DEAL_ENTRY);
-            ENUM_DEAL_TYPE  deType  = (ENUM_DEAL_TYPE) HistoryDealGetInteger(tk, DEAL_TYPE);
-            long     pid = (long)HistoryDealGetInteger(tk, DEAL_POSITION_ID);
-            datetime dt  = (datetime)HistoryDealGetInteger(tk, DEAL_TIME);
-
-            int idx = -1;
-            for(int k = 0; k < pc; k++) if(posId[k] == pid) { idx = k; break; }
-            if(idx < 0)
-            {
-                idx = pc++;
-                ArrayResize(posId, pc); ArrayResize(posOpen, pc); ArrayResize(posClose, pc);
-                posId[idx] = pid; posOpen[idx] = 0; posClose[idx] = 0;
-            }
-
-            if(deEntry == DEAL_ENTRY_IN)
-            {
-                if(posOpen[idx] == 0) posOpen[idx] = dt;
-                string cmt = HistoryDealGetString(tk, DEAL_COMMENT);
-                if(StringFind(cmt, "AUR_SS") < 0 && StringFind(cmt, "AUR_BS") < 0)
-                {
-                    ciclosWeek++;
-                    if(dt >= dayStart) ciclosToday++;
-                }
-            }
-            else if(deEntry == DEAL_ENTRY_OUT)
-            {
-                posClose[idx] = dt;
-                double net = HistoryDealGetDouble(tk, DEAL_PROFIT)
-                           + HistoryDealGetDouble(tk, DEAL_COMMISSION)
-                           + HistoryDealGetDouble(tk, DEAL_SWAP);
-                int dir = (deType == DEAL_TYPE_BUY) ? 1 : -1;
-                ArrayResize(exitTime, ec+1);
-                ArrayResize(exitNet,  ec+1);
-                ArrayResize(exitDir,  ec+1);
-                exitTime[ec] = dt; exitNet[ec] = net; exitDir[ec] = dir; ec++;
-            }
-        }
-
-        // Cycle grouping: same direction within 30 seconds.
-        // lastT is the time of the last exit in the group — used to split today vs week.
-        if(ec > 0)
-        {
-            double   curNet = exitNet[0];
-            datetime lastT  = exitTime[0];
-            int      lastD  = exitDir[0];
-            for(int i = 1; i < ec; i++)
-            {
-                if(exitDir[i] == lastD && (long)(exitTime[i] - lastT) <= 30)
-                { curNet += exitNet[i]; lastT = exitTime[i]; }
-                else
-                {
-                    bool tod = (lastT >= dayStart);
-                    if(curNet > 0.10) { aboveCyclesWeek++; if(tod) aboveCyclesToday++; }
-                    else              { beCyclesWeek++;    if(tod) beCyclesToday++;    }
-                    curNet = exitNet[i]; lastT = exitTime[i]; lastD = exitDir[i];
-                }
-            }
-            bool tod = (lastT >= dayStart);
-            if(curNet > 0.10) { aboveCyclesWeek++; if(tod) aboveCyclesToday++; }
-            else              { beCyclesWeek++;    if(tod) beCyclesToday++;    }
-        }
-
-        for(int k = 0; k < pc; k++)
-        {
-            if(posOpen[k] > 0 && posClose[k] > posOpen[k])
-            {
-                long s = (long)(posClose[k] - posOpen[k]);
-                sumSec += s; durN++;
-                if(minSec < 0 || s < minSec) minSec = s;
-                if(s > maxSec) maxSec = s;
-            }
-        }
+        int _b1, _b2, _b3; double _b4;
+        ComputeHistoryStats(0, 0, s_atOps, _b1, s_atCyc, _b2, s_atMxF, _b3, s_atPnl, _b4);
+        g_statsAllDirty = false;
+        s_atLastCalc = TimeCurrent();
     }
 
-    // ── Format durations ─────────────────────────────────────────
-    string sMin = (minSec < 0) ? "--" : (minSec < 3600)
-        ? StringFormat("%dm", (int)(minSec/60))
-        : StringFormat("%dh%02dm", (int)(minSec/3600), (int)(minSec%3600)/60);
+    int    opsToday, opsWeek, cycToday, cycWeek, mxFToday, mxFWeek;
+    double pnlToday, pnlWeek;
+    ComputeHistoryStats(weekStart, dayStart,
+                        opsWeek, opsToday, cycWeek, cycToday,
+                        mxFWeek, mxFToday, pnlWeek, pnlToday);
 
-    long avgSec = (durN > 0) ? (sumSec / durN) : 0;
-    string sAvg = (avgSec < 3600)
-        ? StringFormat("%dm", (int)(avgSec/60))
-        : StringFormat("%dh%02dm", (int)(avgSec/3600), (int)(avgSec%3600)/60);
-
-    string sMax = (maxSec < 3600)
-        ? StringFormat("%dm", (int)(maxSec/60))
-        : StringFormat("%dh%02dm", (int)(maxSec/3600), (int)(maxSec%3600)/60);
+    // Worst floating drawdown per window (tick-tracked; DB/GV-seeded at init)
+    RollDDWindows();
+    double avgToday = (cycToday > 0) ? pnlToday / cycToday : 0.0;
+    double avgWeek  = (cycWeek  > 0) ? pnlWeek  / cycWeek  : 0.0;
+    double avgAll   = (s_atCyc  > 0) ? s_atPnl  / s_atCyc  : 0.0;
 
     // ── Background panel (OBJ_BITMAP_LABEL — true ARGB transparency) ──
     // EnsurePanelPos() pins the panel to the chart bottom when !g_panDragged,
@@ -1988,15 +2170,14 @@ void UpdateDashboard()
     }
 
     // ── Colour palette ───────────────────────────────────────────
-    color cGold  = C'255,200,60';    // cycle counts   — bright amber-gold
-    color cBlue  = C'160,205,255';   // durations      — bright sky-blue
-    color cGreen = C'80,235,140';    // above BE       — vivid emerald
-    color cDim   = C'150,165,190';   // breakeven      — medium slate (was too dark)
-    color cLabel = C'130,148,172';   // row labels     — visible on dark panel
+    color cGold  = C'255,200,60';    // Today row      — bright amber-gold
+    color cDim   = C'150,165,190';   // Week row       — medium slate
+    color cAll   = C'205,215,232';   // All-time row   — soft white
+    color cLabel = C'130,148,172';   // header/labels  — visible on dark panel
 
-    // ── 7 label rows (YDISTANCE measured from panel bottom) ──────
-    // Row 0 — status / state  (shifted to y=169 to make room for the preview line)
-    DashLabel(N_DASH0, 169, statText, statColor);
+    // ── 8 label rows (YDISTANCE measured from panel bottom) ──────
+    // Row 0 — status / state
+    DashLabel(N_DASH0, 193, statText, statColor);
 
     // Row N — next upcoming event (session pause or news)
     // Priority: imminent session pause > imminent pre-block > informational news
@@ -2045,30 +2226,90 @@ void UpdateDashboard()
         // else: no upcoming events — line stays empty
     }
     // Empty string shows MT5 default "Label" text — use a space instead.
-    DashLabel(N_DASHN, 145, (nextText == "" ? " " : nextText), nextColor);
+    DashLabel(N_DASHN, 169, (nextText == "" ? " " : nextText), nextColor);
 
     // Row B — box info
-    DashLabel(N_DASHB, 121, boxText, cLabel);
+    DashLabel(N_DASHB, 145, boxText, cLabel);
 
-    // Row 1 — today: cycles started + closed breakdown (BE / above BE)
-    DashLabel(N_DASH1, 93,
-        StringFormat("Today  %d  |  BE %d   >BE %d",
-                     ciclosToday, beCyclesToday, aboveCyclesToday),
+    // Stats table — header + Today + Week + All, aligned monospace columns.
+    // ops = entries placed | cyc = closed cycles | mxF = most folds in one cycle
+    // maxDD = worst floating DD | P/L = realized net | avg = P/L per cycle
+    DashLabel(N_DASH1, 117,
+        "     " + PadL("ops",4) + PadL("cyc",5) + PadL("mxF",5)
+                + PadL("maxDD",8) + PadL("P/L",8) + PadL("avg",7),
+        cLabel);
+
+    DashLabel(N_DASH2, 93,
+        "Today" + PadL(IntegerToString(opsToday),4) + PadL(IntegerToString(cycToday),5)
+                + PadL(IntegerToString(mxFToday),5) + PadL(FmtSigned(g_ddDayMin),8)
+                + PadL(FmtSigned(pnlToday),8) + PadL(FmtSigned(avgToday),7),
         cGold);
 
-    // Row 2 — week: same breakdown
-    DashLabel(N_DASH2, 69,
-        StringFormat("Week   %d  |  BE %d   >BE %d",
-                     ciclosWeek, beCyclesWeek, aboveCyclesWeek),
+    DashLabel(N_DASH3, 69,
+        "Week " + PadL(IntegerToString(opsWeek),4) + PadL(IntegerToString(cycWeek),5)
+                + PadL(IntegerToString(mxFWeek),5) + PadL(FmtSigned(g_ddWeekMin),8)
+                + PadL(FmtSigned(pnlWeek),8) + PadL(FmtSigned(avgWeek),7),
         cDim);
 
-    // Row 3 — durations
-    DashLabel(N_DASH3, 45,
-        StringFormat("Duration  min %s \xB7 avg %s \xB7 max %s", sMin, sAvg, sMax),
-        cBlue);
+    DashLabel(N_DASHA, 45,
+        "All  " + PadL(IntegerToString(s_atOps),4) + PadL(IntegerToString(s_atCyc),5)
+                + PadL(IntegerToString(s_atMxF),5) + PadL(FmtSigned(g_ddAllMin),8)
+                + PadL(FmtSigned(s_atPnl),8) + PadL(FmtSigned(avgAll),7),
+        cAll);
 
-    // Row 4 — blank (freed from old separate breakeven rows)
-    DashLabel(N_DASH4, 21, " ", cLabel);
+    // Row 4 — sizing capacity: lot used, folds budgeted, and the max adverse gold move
+    // the sizing withstands (initial entry → one interval past the last budgeted fold):
+    // (folds+1) × scale-in distance. Fixed pips → independent of the current price level.
+    // Mixed %f/%d in StringFormat is unstable in MQL5 → build with concatenation.
+    string lotText;
+    {
+        int    folds = (InpAutoLotFolds > 0) ? InpAutoLotFolds : 10;
+        double range = (folds + 1) * InpMinOrderDist * PIP_VALUE;
+        double lt;
+        if(InpFixedLots > 0.0) lt = InpFixedLots;
+        else { int tier; lt = GetAutoLot(tier); }
+        lotText = "Lot " + DoubleToString(lt, 2)
+                + "  \xB7  " + IntegerToString(folds) + " folds"
+                + "  \xB7  \x2194 $" + DoubleToString(range, 2);
+    }
+    DashLabel(N_DASH4, 21, lotText, cLabel);
+
+    // ── Warning banner (top-centre, blinking) ──────────────────────
+    // HALTED (kill switch) takes priority; otherwise shown when the active cycle
+    // exceeds InpAlertScaleIns folds. Alternating colours make it impossible to miss.
+    int foldsNow = 0;
+    if(g_state == STATE_SELLS)      foldsNow = CountPositions(POSITION_TYPE_SELL) - 1;
+    else if(g_state == STATE_BUYS)  foldsNow = CountPositions(POSITION_TYPE_BUY)  - 1;
+    if(g_halted || (InpAlertScaleIns > 0 && foldsNow > InpAlertScaleIns))
+    {
+        string wtxt;
+        color  wclr;
+        if(g_halted)
+        {
+            wtxt = "\x26A0 HALTED \xB7 MAX-LOSS STOP \x26A0";
+            wclr = (((int)TimeLocal()) % 2 == 0) ? C'255,64,64' : C'170,30,30';
+        }
+        else
+        {
+            ENUM_POSITION_TYPE pt = (g_state == STATE_SELLS) ? POSITION_TYPE_SELL : POSITION_TYPE_BUY;
+            wtxt = "\x26A0 " + IntegerToString(foldsNow) + " FOLDS  \xB7  "
+                 + DoubleToString(GetTotalVolume(pt), 2) + " lots \x26A0";
+            wclr = (((int)TimeLocal()) % 2 == 0) ? C'255,64,64' : C'255,200,60';
+        }
+        if(ObjectFind(0, N_WARN) < 0) ObjectCreate(0, N_WARN, OBJ_LABEL, 0, 0, 0);
+        ObjectSetInteger(0, N_WARN, OBJPROP_CORNER,     CORNER_LEFT_UPPER);
+        ObjectSetInteger(0, N_WARN, OBJPROP_ANCHOR,     ANCHOR_CENTER);
+        ObjectSetInteger(0, N_WARN, OBJPROP_XDISTANCE,  (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS) / 2);
+        ObjectSetInteger(0, N_WARN, OBJPROP_YDISTANCE,  45);
+        ObjectSetString (0, N_WARN, OBJPROP_FONT,       "Arial Black");
+        ObjectSetInteger(0, N_WARN, OBJPROP_FONTSIZE,   16);
+        ObjectSetString (0, N_WARN, OBJPROP_TEXT,       wtxt);
+        ObjectSetInteger(0, N_WARN, OBJPROP_COLOR,      wclr);
+        ObjectSetInteger(0, N_WARN, OBJPROP_SELECTABLE, false);
+        ObjectSetInteger(0, N_WARN, OBJPROP_HIDDEN,     true);
+    }
+    else if(ObjectFind(0, N_WARN) >= 0)
+        ObjectDelete(0, N_WARN);
 }
 
 //+------------------------------------------------------------------+
@@ -2144,6 +2385,8 @@ int OnInit()
     g_botTouchCount = g_topTouchCount = 0;
     g_botInZone = g_topInZone = false;
     g_state = STATE_IDLE; g_tpFrozen = false; g_noNewCycles = false; g_prevBlockTime = 0; g_tradeBlockTime = 0;
+    g_halted = (!IsTesting() && GlobalVariableCheck("AUR_HALT"));   // halt survives restarts; user deletes GV (F3) to resume
+    if(g_halted) Print("AurumBlock: HALTED by kill switch — delete global variable AUR_HALT (F3) to resume trading");
     g_panX = -1; g_panY = -1; g_panDragged = false;
     g_dragging = false; g_prevLBtn = false;
     g_trade.SetExpertMagicNumber(MAGIC_NUMBER);
@@ -2173,6 +2416,7 @@ int OnInit()
     g_lastBarTime = iTime(Symbol(), Period(), 0);
     DBInit();
     DBLogSession();
+    DBSeedDDMinima();
     g_initialized = true;
     return INIT_SUCCEEDED;
 }

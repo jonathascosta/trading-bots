@@ -1,8 +1,8 @@
 # AurumBlock
 
 **Platform:** MetaTrader 5  
-**Version:** 1.40  
-**Last updated:** 2026-06-09  
+**Version:** 1.51  
+**Last updated:** 2026-07-08  
 **Based on:** [FvgBlock](../FvgBlock/) v3.87
 
 ## What it does
@@ -35,7 +35,12 @@ Trading starts at 23:15 (15 min after Sydney open) — no pause around Sydney.
 
 ## News filter
 
-Asymmetric window: **135 minutes before** an event (no new entries, existing scale-ins continue) → **15 minutes after** (trading resumes).
+Two nested zones around each event:
+
+| Zone | Window | Effect |
+|---|---|---|
+| Soft | −180 min → +15 min | Blocks new entries only; scale-ins on open positions continue |
+| Hard | −60 min → +15 min | Freezes everything including scale-ins |
 
 Events are read from `fvg_news.csv` in `%APPDATA%\MetaQuotes\Terminal\Common\Files\`. While running live, the EA automatically syncs new USD events from the MT5 native economic calendar into the CSV daily (dedup, sorted, history preserved). Backtests read the same CSV, making news blocks reproducible without a live calendar API.
 
@@ -47,7 +52,7 @@ The calendar whitelist filters only events that materially move gold:
 - **Activity:** ISM Manufacturing, ISM Services
 - **Fed:** FOMC, Powell speeches, Fed member statements
 
-Both high-impact (red) and moderate-impact (orange) events on the whitelist are blocked.
+Both high-impact (red) and moderate-impact (orange) events on the whitelist are blocked. The dashboard banner distinguishes "NEWS … scale-ins" (soft zone) from "NEWS … frozen" (hard zone).
 
 ## Lot sizing
 
@@ -67,6 +72,8 @@ Each tier adds one extra fold of safety margin to match the larger position. The
 | 2.00 – 3.99 | 8 | 8 |
 | 4.00 – 7.99 | 9 | 9 |
 
+The starting tier `n` is controlled by `InpAutoLotFolds` (default 10). A higher value produces a smaller, more conservative initial lot; a lower value produces a larger, more aggressive lot. This only affects the initial lot size — it does not limit the actual number of scale-ins.
+
 Set `InpFixedLots > 0` to override with a fixed lot without recompiling. Scale-in lots multiply the previous position's lot by `InpLotMultiplier` regardless of this setting.
 
 ## Dashboard (bottom-left)
@@ -75,13 +82,21 @@ Semi-transparent dark navy card (88% opacity, true ARGB bitmap, 370 px wide). Th
 
 Rows top to bottom:
 
-- **Status row** — current state: `● ACTIVE` (green), `▶ NEWS <name> » Xm` (amber), `⏸ <Session> pause » Xm` (amber), `■ PAUSED` (red)
-- **Next event row** — upcoming pause/news preview: amber when < 90 min to news pre-block or < 60 min to session pause; dim informational when event is within 8 h
-- **Box row** — active FVG block range, pip size, and per-band touch counters (`↑Nt ↓Nt`; prefixed with `!` when a band is exhausted)
-- **Today row** — cycles started today + closed breakdown: `BE N  >BE N` (BE = net P&L ≤ $0.10; >BE = net P&L > $0.10)
-- **Week row** — same breakdown for the current week
-- **Duration row** — min / avg / max per closed position
-- **Version label** — EA version shown in dim text at the bottom-right of the panel
+- **Status row** — current state: `● ACTIVE` (green), `◈ SAFE  scale-ins only` (indigo), `▶ NEWS <name>` (amber), `⏸ <Session> pause` (amber), `■ PAUSED` (red), `■ HALTED max-loss` (bright red)
+- **Next event / version row** — upcoming pause/news preview with countdown; EA version in dim text at the right
+- **Box row** — active FVG block range, pip size, and per-band touch counters (`↑Nt ↓Nt`; prefixed with `!` when exhausted)
+- **Lot row** — initial lot, budgeted folds, and max adverse gold move the sizing can absorb (e.g. `Lot 0.21 · 10 folds · ↔ $143.00`)
+- **Statistics table** — three rows aligned in monospace (Consolas):
+
+```
+        ops  cyc  mxF   maxDD     P/L    avg
+Today    27   15    5   -2781    +543    +36
+Week     87   44    6   -5200   +2100    +48
+All     312  180    8  -12400   +8900    +49
+```
+
+- **Warning banner** — `⚠ N FOLDS · X lots ⚠` flashing red/amber when active cycle exceeds `InpAlertScaleIns` folds
+- **Halt banner** — `⚠ HALTED · MAX-LOSS STOP ⚠` flashing red/dark when EA is halted
 
 Set `InpUIScale = 2` on Mac Retina / HiDPI displays to prevent the bitmap from rendering at half the logical size.
 
@@ -101,14 +116,11 @@ Each **visit** to the zone counts as one touch, regardless of how many consecuti
 
 ## Safe Mode
 
-When `InpSafeMode = true`, new cycle entries are restricted to two UTC+1 time windows:
+When `InpSafeMode = true` (default), new cycle entries are restricted to a single UTC+1 window: **01:15 – 10:45**. The only interruption within that window is the London session pause (07:45–08:15), which blocks new entries for 30 minutes but leaves scale-ins running.
 
-| Window | Hours |
-|---|---|
-| Window 1 | 01:15 – 05:45 |
-| Window 2 | 08:15 – 10:45 |
+Outside the safe window, pending limit orders are cancelled and no new initial entries are placed. Scale-ins on existing open positions continue normally (session pauses are overridden by Safe Mode for scale-ins). News hard-zone blocks still freeze scale-ins in all cases.
 
-Outside these windows, pending limit orders are cancelled and no new initial entries are placed. Scale-ins on existing open positions continue normally. Session pauses are overridden by Safe Mode for scale-ins (news blocks still apply in all cases). The dashboard shows `◈ SAFE  scale-ins only` (indigo) when outside a window and `● ACTIVE  (safe window)` when inside one.
+The dashboard shows `◈ SAFE  scale-ins only` (indigo) when outside the window and `● ACTIVE  (safe window)` when inside it.
 
 ## Configuration
 
@@ -117,9 +129,12 @@ Most settings are `#define` constants — change them and recompile. The runtime
 | Input | Default | Description |
 |---|---|---|
 | `InpFixedLots` | 0.0 | Fixed initial lot (0 = auto by balance formula) |
-| `InpMinOrderDist` | 130.0 | Pips between scale-in levels (was `#define`, now tunable at runtime / in optimizer) |
+| `InpMinOrderDist` | 130.0 | Pips between scale-in levels |
 | `InpLotMultiplier` | 2.0 | Scale-in lot multiplier (2 = double, 3 = triple, 4 = quadruple) |
-| `InpSafeMode` | false | Restrict new cycle entries to two UTC+1 windows (01:15–05:45 and 08:15–10:45) |
+| `InpAutoLotFolds` | 10 | Budgeted folds for the auto-lot formula (higher = smaller/safer lot) |
+| `InpSafeMode` | true | Restrict new cycle entries to the 01:15–10:45 UTC+1 window |
+| `InpAlertScaleIns` | 4 | Push alert threshold: notify on every scale-in beyond this fold count (0 = off) |
+| `InpMaxLossPct` | 12.0 | Daily loss kill switch as % of balance (0 = off); halts EA permanently via `AUR_HALT` GV |
 | `InpUIScale` | 1 | Dashboard scale: `1` = Windows / non-Retina Mac; `2` = Mac Retina / HiDPI |
 | `InpLogTrades` | true | Log every order and position close to SQLite |
 | `InpLogBlocks` | true | Log every new FVG block activation to SQLite |
@@ -134,7 +149,8 @@ Key constants (edit in source before compiling):
 | `ZONE_PCT` | 5.0 | Entry zone as % of block |
 | `COST_PER_LOT` | 0.06 | Round-trip cost per 0.01 lot |
 | `PAUSE_WINDOW_MIN` | 15 | Minutes blocked around session opens |
-| `NEWS_PRE_SEC` | 8100 | Seconds before event to block (135 min) |
+| `NEWS_PRE_SOFT_SEC` | 10800 | Seconds before event to block new entries only (180 min) |
+| `NEWS_PRE_HARD_SEC` | 3600 | Seconds before event to freeze everything incl. scale-ins (60 min) |
 | `NEWS_POST_SEC` | 900 | Seconds after event to resume (15 min) |
 | `TRADE_START_H/M` | 23:15 | Trading window start |
 | `FORCE_CLOSE_H/M` | 19:45 | Force-close / scale-in threshold (unified) |
@@ -142,6 +158,19 @@ Key constants (edit in source before compiling):
 | `LOCAL_OFFSET` | 1 | Local UTC offset |
 | `TOUCH_WARN_COUNT` | 3 | Touch threshold to flag a band as exhausted and block new entries |
 | `C_OVERTOUCHED` | `C'255,153,153'` | Band colour when touch count ≥ `TOUCH_WARN_COUNT` (red) |
+
+## Kill switch (max daily loss)
+
+When `InpMaxLossPct > 0`, the EA monitors `daily_profit + floating_PnL` on every tick. If the combined loss reaches or exceeds `InpMaxLossPct %` of the current balance, the EA:
+
+1. Closes all open positions and cancels pending orders immediately
+2. Enters a **permanent halt** — no new entries or scale-ins until manually re-armed
+3. Persists the halt state in terminal global variable `AUR_HALT` (survives EA and MT5 restarts)
+4. Sends a push notification to the MT5 mobile app and fires a desktop `Alert()`
+
+**To re-arm:** delete the `AUR_HALT` global variable via `Tools → Global Variables` (F3) in MT5.
+
+The dashboard shows `■ HALTED max-loss · F3 del AUR_HALT` in bright red (highest priority status) and a large flashing `⚠ HALTED · MAX-LOSS STOP ⚠` banner. The state machine continues running during the halt so that any forced closes are correctly logged to the database.
 
 ## Activity logging (SQLite)
 

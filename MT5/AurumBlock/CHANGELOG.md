@@ -1,5 +1,230 @@
 # AurumBlock EA — Changelog
 
+## v1.51 — 2026-07-08
+
+### Feature — Kill switch por perda absoluta (`InpMaxLossPct`)
+
+Novo input `InpMaxLossPct` (grupo Risk, default **12.0**; `0` = desligado). Quando
+`GetDailyProfit() + GetFloatingPnL() <= -InpMaxLossPct% do balance actual`:
+
+- Fecha todas as posições e cancela pendentes
+- **Halt permanente**: sem entradas novas nem scale-ins; persiste em restarts via
+  global variable do terminal `AUR_HALT`
+- **Rearme manual apenas**: apagar a GV `AUR_HALT` (F3 no MT5) e o EA volta ao normal
+- Alerta: push (telemóvel) + `Alert()` (desktop); `[ALERT]` no journal em tester
+- O state machine continua a correr durante o halt → o fecho forçado é logado na DB
+  (lição do bug v1.40)
+
+**Painel:** linha de status vermelho vivo `■ HALTED max-loss · F3 del AUR_HALT`
+(prioridade sobre PAUSED/news) + banner grande a piscar vermelho/escuro
+`⚠ HALTED · MAX-LOSS STOP ⚠` (prioridade sobre o banner de dobras).
+
+Ex. (balance 1.160.000 USC, 12%): dispara quando dia+flutuante ≤ −139.200 USC —
+o lucro do dia estica a folga, o prejuízo do dia encolhe-a.
+
+---
+
+## v1.50 — 2026-07-08
+
+### Fix — Exaustão de banda deixava LIMITs vivas e subcontava toques
+
+**Problema:** o gate de exaustão (≥3 toques → sem entradas novas nessa banda) tinha
+dois buracos: (1) a contagem só actualiza no fecho da barra, então uma LIMIT
+(re)colocada durante o próprio toque que exaure a banda ficava pousada — e nada a
+cancelava depois; (2) a histerese fundia ciclos consecutivos numa só visita quando
+o preço não saía da zona, mantendo o contador baixo em consolidações coladas à banda.
+
+**Fix A — cancelamento:** pendentes numa banda exausta são canceladas em todos os
+ticks (novo bloco após o cancelamento de news/pausas). Uma LIMIT que sobreviva ao
+timing do fecho de barra é retirada antes de poder encher.
+
+**Fix C — fill conta como toque:** abrir um ciclo numa banda incrementa o contador
+imediatamente (na transição de abertura do state machine), mesmo sem o preço sair
+da zona. Seta o flag in-zone para o ProcessBar não recontar a mesma visita no fecho
+da barra. Consequência: 3 ciclos na mesma banda = banda exausta.
+
+---
+
+## v1.49 — 2026-07-08
+
+### Feature — Linha "All" (all-time) na tabela de estatísticas do painel
+
+Nova linha `All` sob a `Week`, mesmas colunas (ops/cyc/mxF/maxDD/P&L/avg), cor
+branco-suave. Painel cresce 24 px (8 linhas, `DASH_PAN_H` 179→203).
+
+- **Cache:** a passagem pelo histórico completo é recalculada apenas quando um
+  ciclo fecha (`g_statsAllDirty`) ou a cada 60 s — não pesa no tick.
+- **Refactor:** loop de estatísticas extraído para `ComputeHistoryStats(from,
+  bucketStart, …)`, partilhado pelas janelas Today/Week e All.
+- **maxDD all-time:** `g_ddAllMin` (tick-tracked, sem rollover), persistido na
+  global variable do terminal `AUR_DD_ALL` — sobrevive ao pruning mensal da DB
+  (30 dias) e a restarts. Seed no arranque: min(GV, `MIN(max_dd)` da DB).
+- Nota: ops/cyc/P&L all-time vêm do histórico do servidor MT5 (completo); no
+  Strategy Tester a linha All cobre o período do teste.
+
+---
+
+## v1.48 — 2026-07-07
+
+### Change — Painel redesenhado: tabela de estatísticas Today/Week
+
+As linhas Today/Week (BE / >BE) e Duration dão lugar a uma tabela de 3 linhas
+alinhadas (Consolas monospace), valores em moeda da conta (USC na ProCent):
+
+```
+        ops  cyc  mxF   maxDD     P/L    avg
+Today    27   15    5   -2781    +543    +36
+Week     87   44    6   -5200   +2100    +48
+```
+
+- **ops** — entradas colocadas (inicial + dobras), do histórico de deals
+- **cyc** — ciclos fechados (grupos de fechos, mesma direção ≤30s)
+- **mxF** — máximo de dobras num ciclo (tamanho do grupo − 1)
+- **maxDD** — pior drawdown flutuante da janela (novo: `g_ddDayMin`/`g_ddWeekMin`
+  actualizados a cada tick; seed de `cycles.max_dd` via `DBSeedDDMinima()` no
+  arranque para sobreviver a restarts; no tester só tracking em memória)
+- **P/L** — lucro líquido realizado da janela
+- **avg** — P/L ÷ ciclos
+
+Removidos: repartição BE / >BE e linha Duration (min/avg/max). Restantes linhas
+(status, próximo evento + versão, Box, Lot/folds/↔$) inalteradas. Novos helpers
+`PadL()` e `FmtSigned()`.
+
+---
+
+## v1.47 — 2026-07-07
+
+### Change — Default de dobras orçadas 6→10 + escalada de alertas por dobra
+
+**`InpAutoLotFolds` default 6 → 10.** Lote inicial fica bem menor para o mesmo saldo
+(ex.: 1.160.000 USC → 0.21 lots em vez de 1.77), mas a conta aguenta 11×dist = $143
+de movimento adverso (antes $91).
+
+**Alertas por dobra (antes: um por ciclo).** A partir da dobra que exceder
+`InpAlertScaleIns` (default 4 → 5.ª dobra), alerta em **cada nova dobra**
+(5.ª, 6.ª, 7.ª…). Flag `g_scaleAlertSent` substituída por `g_lastAlertedFold`
+(reposto no fecho do ciclo). Cada alerta agora também dispara `Alert()` no
+desktop (popup + som) além do push para o telemóvel.
+
+**Banner de aviso no gráfico.** Quando o ciclo activo excede `InpAlertScaleIns`
+dobras, aparece um banner grande no topo-centro do gráfico (`AUR_WARN`,
+Arial Black 16): "⚠ N FOLDS · X lots ⚠", alternando vermelho/âmbar a cada
+segundo. Desaparece quando o ciclo fecha.
+
+---
+
+## v1.46 — 2026-07-07
+
+### Change — Row 4 do painel mostra capacidade de dimensionamento
+
+A linha do lote passa a mostrar três valores: **lote** utilizado (auto-lot calculado
+ou fixo), **dobras orçadas** (`InpAutoLotFolds`) e o **movimento adverso máximo do
+ouro em USD** que o dimensionamento aguenta: `(dobras+1) × distância de scale-in`.
+
+Ex.: saldo 1.160.000 USC → `Lot 1.77 · 6 folds · ↔ $91.00`
+(6 dobras a cada 130 pips = $13 → entrada inicial + 6 dobras + 1 intervalo = 7×$13).
+
+Como a distância é em pips fixos, o valor é independente do nível de preço actual.
+Substitui o indicador `base→tier` da v1.44 (a informação de tier continua implícita
+no lote calculado).
+
+---
+
+## v1.45 — 2026-06-30
+
+### Feature — Alerta push no telemóvel ao exceder N dobras (`InpAlertScaleIns`)
+
+Novo input `InpAlertScaleIns` (default **4**, `0` = desligado). Quando um ciclo excede
+esse nº de dobras, o EA envia **um** push para a app MT5 mobile via `SendNotification()`.
+
+- Dispara no scale-in cujo nº de dobras > `InpAlertScaleIns` (ex.: default 4 → alerta
+  na **5.ª** dobra).
+- **Uma vez por ciclo** (flag `g_scaleAlertSent`, reposta quando o ciclo fecha).
+- Mensagem: símbolo, direção, nº de dobras, lotes totais e break-even.
+- No Strategy Tester (push indisponível) escreve `[ALERT] …` no journal — permite
+  validar o gatilho em backtest.
+
+**Requer:** MetaQuotes ID configurado em Tools→Options→Notifications (e a app MT5
+mobile ligada a esse ID).
+
+---
+
+## v1.44 — 2026-06-30
+
+### Feature — Nº de dobras da auto-lot configurável (`InpAutoLotFolds`)
+
+Novo input `InpAutoLotFolds` (default **6** = comportamento anterior). Controla
+quantas dobras a fórmula de auto-lot orça ao dimensionar o lote inicial (só quando
+`InpFixedLots = 0`). O valor era hardcoded a 6 em `GetLots()`.
+
+- **Não limita** as dobras reais — só afecta o **tamanho do lote inicial**.
+- Valor **maior** → lote inicial **menor/mais conservador** (orça sobreviver a mais dobras).
+- Valor **menor** → lote inicial **maior/mais agressivo**.
+
+Implementação: `GetLots()` usa `base = InpAutoLotFolds` como início do loop e na
+referência do threshold `2^(n-base)`, em vez do `6` fixo.
+
+**Dashboard:** a Row 4 do painel (antes em branco) mostra agora o **lote inicial** e as
+**dobras orçadas**. Mostra `base→tier` quando o saldo já subiu de tier (ex.: `6→7 folds`),
+ou só o número quando coincidem. Em lote fixo mostra `Lot fixed X`. Novo helper
+`GetAutoLot(int &outFolds)` expõe o tier resolvido (usado pelo `GetLots` e pelo painel).
+
+---
+
+## v1.43 — 2026-06-30
+
+### Change — Filtro de notícias em duas zonas + Safe Mode ligado por omissão
+
+**Notícias (antes):** uma janela única −135min/+15min bloqueava tudo (entradas e
+scale-ins) de igual forma.
+
+**Notícias (agora):** duas zonas aninhadas à volta de cada evento (UTC):
+- **Soft (−180min → +15min):** bloqueia só **entradas novas**; scale-ins continuam.
+- **Hard (−60min → +15min):** **congela tudo**, incluindo scale-ins.
+- **+15min:** retoma o comportamento normal.
+
+Implementação: `IsNewsTime()` substituída por `IsNewsNoEntry()` (soft, em `canOpen`,
+cancelamento de pendentes, logging e preview) e `IsNewsNoScale()` (hard, nos guards de
+scale-in SELLS/BUYS). Defines `NEWS_PRE_SOFT_SEC=10800`, `NEWS_PRE_HARD_SEC=3600`,
+`NEWS_POST_SEC=900`. Banner do dashboard distingue "NEWS … scale-ins" (soft) de
+"NEWS … frozen" (hard).
+
+**Safe Mode:** default de `InpSafeMode` passa de `false` para **`true`**.
+
+---
+
+## v1.42 — 2026-06-30
+
+### Change — Safe Mode passa a janela única 01:15–10:45 (UTC+1)
+
+**Antes:** Safe Mode tinha duas janelas (01:15–05:45 e 08:15–10:45) com um intervalo
+05:45–08:15 em que o EA só fazia scale-ins (sem entradas novas) — uma "zona morta"
+de 2h30. Aplicava-se igual em live e tester (são `#define`, não inputs).
+
+**Agora:** Janela única contínua **01:15–10:45 UTC+1**. A única interrupção a
+entradas novas dentro desse intervalo é a **pausa de abertura de Londres
+(07:45–08:15 UTC+1)**, já tratada por `IsSessionPauseTime`. Os scale-ins continuam
+durante essa pausa (safe mode mantém-nos activos). Comportamento desejado: operar de
+01:15 a 10:45 com uma única paragem de 30 min para Londres.
+
+---
+
+## v1.41 — 2026-06-30
+
+### Fix — TP de scale-in calculado com preço real de execução
+
+**Problem:** Nos scale-ins, o TP era calculado com `ask`/`bid` no momento da
+submissão da ordem, não com o preço de execução real. Em mercados rápidos com
+slippage, o preço de fill diferia do `ask`/`bid` da submissão, deixando o TP
+incorrecto. A correcção normal (via `GetWeightedBreakEven()` no tick seguinte)
+podia ser bloqueada pelo SIZE GUARD.
+
+**Fix:** Após o fill, recalcula `realBECost` usando `g_trade.ResultPrice()` e
+actualiza os TPs de todas as posições com esse valor. Aplica-se a BUY e SELL
+scale-ins.
+
+---
+
 ## v1.40 — 2026-06-26
 
 ### Fix — Cycle close not logged when active block is too small (SIZE GUARD bug)
